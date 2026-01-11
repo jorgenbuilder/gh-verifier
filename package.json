@@ -1,0 +1,22 @@
+{
+  "name": "icp-build-verifier",
+  "version": "1.0.0",
+  "description": "GitHub Action to verify ICP governance proposal builds",
+  "type": "module",
+  "scripts": {
+    "fetch": "tsx src/fetch-proposal.ts",
+    "extract": "tsx src/extract-build-steps.ts",
+    "build": "bash scripts/build.sh",
+    "compare": "tsx src/compare-hash.ts"
+  },
+  "dependencies": {
+    "@dfinity/agent": "^2.0.0",
+    "@dfinity/candid": "^2.0.0",
+    "@dfinity/principal": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

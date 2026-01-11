@@ -1,0 +1,43 @@
+name: Verify Proposal Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      proposal_id:
+        description: 'NNS Proposal ID to verify'
+        required: true
+        type: string
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/dfinity/ic-build:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch proposal from NNS
+        run: npx tsx src/fetch-proposal.ts ${{ inputs.proposal_id }}
+
+      - name: Extract build steps via LLM
+        run: |
+          # Extra masking for the API key
+          echo "::add-mask::$GEMINI_API_KEY"
+          npx tsx src/extract-build-steps.ts
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Build WASM
+        run: bash scripts/build.sh
+
+      - name: Compare hashes
+        run: npx tsx src/compare-hash.ts
