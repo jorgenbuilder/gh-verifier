@@ -4,8 +4,16 @@ import { writeFileSync } from 'fs';
 
 const GOVERNANCE_CANISTER_ID = 'rrkah-fqaaa-aaaaa-aaaaq-cai';
 
-// Minimal IDL for get_proposal_info
+// IDL for get_proposal_info with InstallCode action variant
 const governanceIdl = ({ IDL }: { IDL: any }) => {
+  const InstallCode = IDL.Record({
+    skip_stopping_before_installing: IDL.Opt(IDL.Bool),
+    wasm_module_hash: IDL.Opt(IDL.Vec(IDL.Nat8)),
+    canister_id: IDL.Opt(IDL.Principal),
+    arg_hash: IDL.Opt(IDL.Vec(IDL.Nat8)),
+    install_mode: IDL.Opt(IDL.Int32),
+  });
+
   const ProposalInfo = IDL.Record({
     id: IDL.Opt(IDL.Record({ id: IDL.Nat64 })),
     proposer: IDL.Opt(IDL.Record({ id: IDL.Nat64 })),
@@ -14,11 +22,7 @@ const governanceIdl = ({ IDL }: { IDL: any }) => {
       summary: IDL.Text,
       url: IDL.Text,
       action: IDL.Opt(IDL.Variant({
-        ExecuteNnsFunction: IDL.Record({
-          nns_function: IDL.Int32,
-          payload: IDL.Vec(IDL.Nat8),
-        }),
-        // Other action types omitted for brevity
+        InstallCode: InstallCode,
       })),
     })),
     status: IDL.Int32,
@@ -37,6 +41,7 @@ interface ProposalData {
   url: string;
   commitHash: string | null;
   expectedWasmHash: string | null;
+  canisterId: string | null;
 }
 
 function extractCommitHash(text: string): string | null {
@@ -46,17 +51,8 @@ function extractCommitHash(text: string): string | null {
   return match ? match[0] : null;
 }
 
-function extractWasmHash(text: string): string | null {
-  // Look for WASM hash patterns - typically SHA256 (64-char hex)
-  // Often labeled as "wasm hash", "module hash", etc.
-  const hashRegex = /(?:wasm|module|sha256)[^\n]*?([a-f0-9]{64})/gi;
-  const match = hashRegex.exec(text);
-  if (match) return match[1];
-
-  // Fallback: look for any 64-char hex string
-  const genericRegex = /\b([a-f0-9]{64})\b/gi;
-  const genericMatch = text.match(genericRegex);
-  return genericMatch ? genericMatch[0] : null;
+function bytesToHex(bytes: number[] | Uint8Array): string {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 async function main() {
@@ -95,10 +91,28 @@ async function main() {
   const summary = proposal.summary || '';
   const url = proposal.url || '';
 
-  // Try to extract commit hash and WASM hash from summary
+  // Extract wasm_module_hash directly from InstallCode action
+  let expectedWasmHash: string | null = null;
+  let canisterId: string | null = null;
+
+  const action = proposal.action?.[0];
+  if (action?.InstallCode) {
+    const installCode = action.InstallCode;
+
+    // Extract wasm_module_hash from bytes
+    if (installCode.wasm_module_hash?.[0]) {
+      expectedWasmHash = bytesToHex(installCode.wasm_module_hash[0]);
+    }
+
+    // Extract canister_id
+    if (installCode.canister_id?.[0]) {
+      canisterId = installCode.canister_id[0].toText();
+    }
+  }
+
+  // Extract commit hash from summary text
   const combinedText = `${title}\n${summary}\n${url}`;
   const commitHash = extractCommitHash(combinedText);
-  const expectedWasmHash = extractWasmHash(combinedText);
 
   const proposalData: ProposalData = {
     proposalId,
@@ -107,18 +121,21 @@ async function main() {
     url,
     commitHash,
     expectedWasmHash,
+    canisterId,
   };
 
   console.log(`Title: ${title}`);
+  console.log(`Canister ID: ${canisterId || 'Not found'}`);
   console.log(`Commit Hash: ${commitHash || 'Not found'}`);
-  console.log(`Expected WASM Hash: ${expectedWasmHash || 'Not found'}`);
+  console.log(`Expected WASM Hash (from onchain): ${expectedWasmHash || 'Not found'}`);
 
   if (!commitHash) {
     console.warn('Warning: Could not extract commit hash from proposal');
   }
 
   if (!expectedWasmHash) {
-    console.warn('Warning: Could not extract expected WASM hash from proposal');
+    console.error('Error: Could not extract wasm_module_hash from proposal action');
+    process.exit(1);
   }
 
   writeFileSync('proposal.json', JSON.stringify(proposalData, null, 2));
