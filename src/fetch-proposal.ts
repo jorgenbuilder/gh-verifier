@@ -4,7 +4,7 @@ import { writeFileSync } from 'fs';
 
 const GOVERNANCE_CANISTER_ID = 'rrkah-fqaaa-aaaaa-aaaaq-cai';
 
-// IDL for get_proposal_info with InstallCode action variant
+// IDL for get_proposal_info with action variants
 const governanceIdl = ({ IDL }: { IDL: any }) => {
   const InstallCode = IDL.Record({
     skip_stopping_before_installing: IDL.Opt(IDL.Bool),
@@ -12,6 +12,12 @@ const governanceIdl = ({ IDL }: { IDL: any }) => {
     canister_id: IDL.Opt(IDL.Principal),
     arg_hash: IDL.Opt(IDL.Vec(IDL.Nat8)),
     install_mode: IDL.Opt(IDL.Int32),
+  });
+
+  // Minimal record for other action types (we only need to detect them, not process them)
+  const UpdateCanisterSettings = IDL.Record({
+    canister_id: IDL.Opt(IDL.Principal),
+    settings: IDL.Opt(IDL.Record({})),
   });
 
   const ProposalInfo = IDL.Record({
@@ -23,6 +29,8 @@ const governanceIdl = ({ IDL }: { IDL: any }) => {
       url: IDL.Text,
       action: IDL.Opt(IDL.Variant({
         InstallCode: InstallCode,
+        UpdateCanisterSettings: UpdateCanisterSettings,
+        // Other action types will be captured as unknown variants
       })),
     })),
     status: IDL.Int32,
@@ -102,23 +110,51 @@ async function main() {
   const summary = proposal.summary || '';
   const url = proposal.url || '';
 
+  // Check if this is an InstallCode action (code upgrade)
+  // Other action types (UpdateCanisterSettings, etc.) don't have code to verify
+  const action = proposal.action?.[0];
+
+  if (!action) {
+    console.log('');
+    console.log('⏭️  SKIPPED: Proposal has no action data');
+    console.log('');
+    // Exit code 78 = neutral (GitHub Actions shows as skipped/gray)
+    process.exit(78);
+  }
+
+  if (!action.InstallCode) {
+    // Determine the action type for logging
+    const actionType = Object.keys(action)[0] || 'Unknown';
+    console.log('');
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('  ⏭️  SKIPPED: NOT A CODE UPGRADE PROPOSAL');
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('');
+    console.log(`  Proposal ID:   ${proposalId}`);
+    console.log(`  Title:         ${title}`);
+    console.log(`  Action Type:   ${actionType}`);
+    console.log('');
+    console.log('  This proposal does not install code, so there is no WASM to verify.');
+    console.log('  Only InstallCode proposals require build verification.');
+    console.log('');
+    // Exit code 78 = neutral (GitHub Actions shows as skipped/gray)
+    process.exit(78);
+  }
+
   // Extract wasm_module_hash directly from InstallCode action
   let expectedWasmHash: string | null = null;
   let canisterId: string | null = null;
 
-  const action = proposal.action?.[0];
-  if (action?.InstallCode) {
-    const installCode = action.InstallCode;
+  const installCode = action.InstallCode;
 
-    // Extract wasm_module_hash from bytes
-    if (installCode.wasm_module_hash?.[0]) {
-      expectedWasmHash = bytesToHex(installCode.wasm_module_hash[0]);
-    }
+  // Extract wasm_module_hash from bytes
+  if (installCode.wasm_module_hash?.[0]) {
+    expectedWasmHash = bytesToHex(installCode.wasm_module_hash[0]);
+  }
 
-    // Extract canister_id
-    if (installCode.canister_id?.[0]) {
-      canisterId = installCode.canister_id[0].toText();
-    }
+  // Extract canister_id
+  if (installCode.canister_id?.[0]) {
+    canisterId = installCode.canister_id[0].toText();
   }
 
   // Extract commit hash from summary text
