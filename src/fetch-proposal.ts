@@ -63,7 +63,18 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`Fetching proposal ${proposalId}...`);
+  console.log('');
+  console.log('═══════════════════════════════════════════════════════════════');
+  console.log('  STEP 1: FETCH PROPOSAL FROM NNS GOVERNANCE (ONCHAIN)');
+  console.log('═══════════════════════════════════════════════════════════════');
+  console.log('');
+  console.log('TRUST ASSUMPTION: Querying the NNS Governance canister directly');
+  console.log('to retrieve the official proposal data from the IC blockchain.');
+  console.log('');
+  console.log(`Proposal ID: ${proposalId}`);
+  console.log(`Governance Canister: ${GOVERNANCE_CANISTER_ID}`);
+  console.log(`IC Endpoint: https://ic0.app`);
+  console.log('');
 
   const agent = new HttpAgent({ host: 'https://ic0.app' });
 
@@ -124,10 +135,18 @@ async function main() {
     canisterId,
   };
 
-  console.log(`Title: ${title}`);
-  console.log(`Canister ID: ${canisterId || 'Not found'}`);
-  console.log(`Commit Hash: ${commitHash || 'Not found'}`);
-  console.log(`Expected WASM Hash (from onchain): ${expectedWasmHash || 'Not found'}`);
+  console.log('PROPOSAL DATA RETRIEVED:');
+  console.log('─────────────────────────────────────────────────────────────────');
+  console.log(`  Title:             ${title}`);
+  console.log(`  Target Canister:   ${canisterId || 'Not found'}`);
+  console.log(`  Source Commit:     ${commitHash || 'Not found'}`);
+  console.log('');
+  console.log('ONCHAIN WASM HASH (from proposal.action.InstallCode.wasm_module_hash):');
+  console.log(`  ${expectedWasmHash || 'Not found'}`);
+  console.log('');
+  console.log('This hash was extracted directly from the onchain proposal payload,');
+  console.log('not from the human-readable summary text.');
+  console.log('─────────────────────────────────────────────────────────────────');
 
   if (!commitHash) {
     console.warn('Warning: Could not extract commit hash from proposal');

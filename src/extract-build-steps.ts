@@ -105,8 +105,17 @@ async function main() {
     process.exit(1);
   }
 
-  console.log('Extracting build steps from proposal...');
-  console.log(`Title: ${proposalData.title}`);
+  console.log('');
+  console.log('═══════════════════════════════════════════════════════════════');
+  console.log('  STEP 2: EXTRACT BUILD INSTRUCTIONS VIA LLM');
+  console.log('═══════════════════════════════════════════════════════════════');
+  console.log('');
+  console.log('TRUST ASSUMPTION: Using Google Gemini to parse the proposal');
+  console.log('summary and extract the build commands. The LLM interprets the');
+  console.log('human-readable instructions to determine how to build the WASM.');
+  console.log('');
+  console.log(`Proposal: ${proposalData.title}`);
+  console.log(`Commit to build: ${proposalData.commitHash}`);
 
   const prompt = EXTRACTION_PROMPT + `
 Title: ${proposalData.title}
@@ -119,8 +128,11 @@ URL: ${proposalData.url}
 
   const { steps, wasmOutputPath } = parseGeminiResponse(response);
 
-  console.log(`Extracted ${steps.length} build steps`);
-  console.log(`WASM output path: ${wasmOutputPath}`);
+  console.log('');
+  console.log('LLM EXTRACTED BUILD INSTRUCTIONS:');
+  console.log('─────────────────────────────────────────────────────────────────');
+  console.log(`  Number of steps: ${steps.length}`);
+  console.log(`  WASM output path: ${wasmOutputPath}`);
 
   const buildSteps: BuildSteps = {
     commitHash: proposalData.commitHash,
@@ -131,11 +143,12 @@ URL: ${proposalData.url}
   writeFileSync('build-steps.json', JSON.stringify(buildSteps, null, 2));
   console.log('Wrote build-steps.json');
 
-  // Also log the steps for visibility in GitHub Actions
-  console.log('\nBuild steps:');
+  console.log('');
+  console.log('BUILD COMMANDS TO EXECUTE:');
   steps.forEach((step, i) => {
     console.log(`  ${i + 1}. ${step}`);
   });
+  console.log('─────────────────────────────────────────────────────────────────');
 }
 
 main().catch((err) => {
