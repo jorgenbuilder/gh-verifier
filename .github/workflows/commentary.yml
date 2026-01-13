@@ -66,7 +66,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Display commentary
+      - name: Format commentary output
         run: |
-          echo "=== Proposal #${{ inputs.proposal_id }} Commentary ==="
-          echo '${{ steps.claude.outputs.result }}'
+          # Extract and format the commentary from Claude's output
+          OUTPUT_FILE="/home/runner/work/_temp/claude-execution-output.json"
+          if [ -f "$OUTPUT_FILE" ]; then
+            echo "## Proposal #${{ inputs.proposal_id }} Commentary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            npx tsx src/format-commentary.ts "$OUTPUT_FILE" >> $GITHUB_STEP_SUMMARY 2>&1 || echo "Failed to format commentary" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Error" >> $GITHUB_STEP_SUMMARY
+            echo "Claude output file not found" >> $GITHUB_STEP_SUMMARY
+          fi
