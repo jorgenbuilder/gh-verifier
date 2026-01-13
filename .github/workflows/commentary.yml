@@ -66,10 +66,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Search forum for discussion thread
+        if: success()
+        env:
+          COMMENTARY_SECRET: ${{ secrets.COMMENTARY_SECRET }}
+          FORUM_LINK_SECRET: ${{ secrets.FORUM_LINK_SECRET }}
+          PORTAL_URL: ${{ secrets.PORTAL_URL }}
+        run: |
+          echo "Searching DFINITY forum for proposal discussion..."
+          npx tsx src/search-forum.ts ${{ inputs.proposal_id }} || {
+            echo "⚠️ Forum search failed (non-fatal)"
+            exit 0
+          }
+
       - name: Format commentary output
         if: always()
         run: |
           OUTPUT_FILE="/home/runner/work/_temp/claude-execution-output.json"
+          FORUM_RESULT="forum-result.json"
 
           # Overwrite the summary completely (not append)
           if [ -f "$OUTPUT_FILE" ]; then
@@ -78,6 +92,24 @@ jobs:
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "Check the workflow logs for Claude's output." >> $GITHUB_STEP_SUMMARY
             }
+
+            # Append forum search result if available
+            if [ -f "$FORUM_RESULT" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "---" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "## Forum Search Result" >> $GITHUB_STEP_SUMMARY
+
+              FOUND=$(jq -r '.found' "$FORUM_RESULT")
+              if [ "$FOUND" = "true" ]; then
+                URL=$(jq -r '.url' "$FORUM_RESULT")
+                TITLE=$(jq -r '.title' "$FORUM_RESULT")
+                echo "✓ Found discussion: [$TITLE]($URL)" >> $GITHUB_STEP_SUMMARY
+              else
+                ERROR=$(jq -r '.error // "No results"' "$FORUM_RESULT")
+                echo "No forum thread found: $ERROR" >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
           else
             echo "## ❌ Error" > $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
