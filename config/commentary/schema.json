@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Proposal Commentary Schema",
+  "description": "AI-generated commentary on ICP governance proposals to aid human reviewers",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "A brief title that summarizes the proposal, making the update easily identifiable"
+    },
+    "proposal_id": {
+      "type": "string",
+      "description": "The NNS proposal ID being analyzed"
+    },
+    "canister_id": {
+      "type": "string",
+      "description": "The target canister ID for this code change"
+    },
+    "commit_summaries": {
+      "type": "array",
+      "description": "Summary for each commit in the change",
+      "items": {
+        "type": "object",
+        "properties": {
+          "commit_hash": {
+            "type": "string",
+            "description": "The commit SHA"
+          },
+          "summary": {
+            "type": "string",
+            "description": "What changed in this commit and why"
+          }
+        },
+        "required": ["commit_hash", "summary"]
+      }
+    },
+    "file_summaries": {
+      "type": "array",
+      "description": "Summary for each file changed",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Path to the changed file"
+          },
+          "summary": {
+            "type": "string",
+            "description": "What changed in this file and why"
+          }
+        },
+        "required": ["file_path", "summary"]
+      }
+    },
+    "overall_summary": {
+      "type": "string",
+      "description": "A comprehensive summary of the code change as a whole: what changed and why"
+    },
+    "why_now": {
+      "type": "string",
+      "description": "Explanation of why this change is necessary now, if determinable from available sources"
+    },
+    "sources": {
+      "type": "array",
+      "description": "Sources consulted for this analysis",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["proposal_body", "git_diff", "github_pr", "forum_post", "documentation", "other"],
+            "description": "The type of source"
+          },
+          "url": {
+            "type": "string",
+            "description": "URL to the source, if applicable"
+          },
+          "description": {
+            "type": "string",
+            "description": "Brief description of what information was obtained"
+          }
+        },
+        "required": ["type", "description"]
+      }
+    },
+    "confidence_notes": {
+      "type": "string",
+      "description": "Any caveats, uncertainties, or limitations in the analysis"
+    },
+    "analysis_incomplete": {
+      "type": "boolean",
+      "description": "True if the analysis could not be completed due to errors or missing information"
+    },
+    "incomplete_reason": {
+      "type": "string",
+      "description": "If analysis_incomplete is true, explains why"
+    }
+  },
+  "required": ["title", "proposal_id", "overall_summary", "sources", "analysis_incomplete"]
+}

@@ -1,0 +1,71 @@
+name: Generate Proposal Commentary
+run-name: "Commentary for Proposal #${{ inputs.proposal_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      proposal_id:
+        description: 'NNS Proposal ID to analyze'
+        required: true
+        type: string
+
+jobs:
+  commentary:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate commentary with Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            # Task: Analyze ICP Governance Proposal #${{ inputs.proposal_id }}
+
+            You are generating AI commentary to help human reviewers understand this NNS governance proposal.
+
+            ## Setup
+
+            1. First, read the configuration files in this repository:
+               - `config/commentary/prompt.md` - Detailed instructions for analysis
+               - `config/commentary/rules.md` - Rules to follow when generating commentary
+               - `config/commentary/schema.json` - The JSON schema your output must match
+
+            2. Follow the step-by-step process described in `config/commentary/prompt.md`
+
+            ## Your Task
+
+            Analyze proposal ID: ${{ inputs.proposal_id }}
+
+            Key steps:
+            1. Run `npx tsx src/fetch-proposal.ts ${{ inputs.proposal_id }}` to fetch proposal data
+            2. Clone the IC repository if needed to analyze the code diff
+            3. Research context from GitHub PRs and (if necessary) the DFINITY forum
+            4. Generate structured commentary
+
+            ## Output Requirements
+
+            Your final output MUST be a valid JSON object matching the schema in `config/commentary/schema.json`.
+            Output ONLY the JSON object - no markdown code fences, no explanatory text before or after.
+
+            Remember: Accuracy is paramount. No commentary is better than fake or misleading commentary.
+          claude_args: --dangerously-skip-permissions --max-turns 50
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Display commentary
+        run: |
+          echo "=== Proposal #${{ inputs.proposal_id }} Commentary ==="
+          echo '${{ steps.claude.outputs.result }}'
