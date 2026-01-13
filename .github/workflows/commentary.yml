@@ -83,3 +83,31 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Claude execution file not found." >> $GITHUB_STEP_SUMMARY
           fi
+
+      - name: Post commentary to reviewer portal
+        if: success()
+        env:
+          COMMENTARY_SECRET: ${{ secrets.COMMENTARY_SECRET }}
+          PORTAL_URL: ${{ secrets.PORTAL_URL }}
+        run: |
+          OUTPUT_FILE="/home/runner/work/_temp/claude-execution-output.json"
+
+          if [ ! -f "$OUTPUT_FILE" ]; then
+            echo "⚠️ Claude execution file not found, skipping portal post"
+            exit 0
+          fi
+
+          if [ -z "$COMMENTARY_SECRET" ]; then
+            echo "⚠️ COMMENTARY_SECRET not configured, skipping portal post"
+            exit 0
+          fi
+
+          if [ -z "$PORTAL_URL" ]; then
+            echo "⚠️ PORTAL_URL not configured, skipping portal post"
+            exit 0
+          fi
+
+          npx tsx src/post-commentary.ts "$OUTPUT_FILE" "${{ inputs.proposal_id }}" || {
+            echo "⚠️ Failed to post commentary to portal (non-fatal)"
+            exit 0
+          }
