@@ -24,10 +24,16 @@ interface CommentarySchema {
   incomplete_reason?: string;
 }
 
-interface ClaudeMessage {
+interface Turn {
   type: string;
-  role?: string;
-  content?: string | Array<{ type: string; text?: string }>;
+  subtype?: string;
+  message?: {
+    content: Array<{ type: string; text?: string }>;
+  };
+  cost_usd?: number;
+  duration_ms?: number;
+  total_cost_usd?: number;
+  num_turns?: number;
 }
 
 function extractJsonFromText(text: string): CommentarySchema | null {
@@ -35,45 +41,50 @@ function extractJsonFromText(text: string): CommentarySchema | null {
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     try {
-      return JSON.parse(jsonMatch[0]);
+      const parsed = JSON.parse(jsonMatch[0]);
+      // Verify it looks like our schema
+      if (parsed.title && parsed.overall_summary) {
+        return parsed;
+      }
     } catch {
-      return null;
+      // Not valid JSON
     }
   }
   return null;
 }
 
-function findCommentaryInOutput(outputPath: string): CommentarySchema | null {
+function parseClaudeOutput(outputPath: string): { commentary: CommentarySchema | null; cost: number; duration: number; turns: number } {
   const raw = readFileSync(outputPath, 'utf-8');
-  const data = JSON.parse(raw);
+  const turns: Turn[] = JSON.parse(raw);
 
-  // The output is an array of messages - find the last assistant message with JSON
-  const messages = Array.isArray(data) ? data : [data];
+  let cost = 0;
+  let duration = 0;
+  let numTurns = 0;
+  let commentary: CommentarySchema | null = null;
 
-  // Search backwards for the final JSON output
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
+  // Process turns
+  for (const turn of turns) {
+    // Get stats from result turn
+    if (turn.type === 'result') {
+      cost = turn.total_cost_usd || turn.cost_usd || 0;
+      duration = turn.duration_ms || 0;
+      numTurns = turn.num_turns || 0;
+    }
 
-    if (msg.type === 'assistant' || msg.role === 'assistant') {
-      // Handle both string content and array content
-      let text = '';
-      if (typeof msg.content === 'string') {
-        text = msg.content;
-      } else if (Array.isArray(msg.content)) {
-        text = msg.content
-          .filter((c: any) => c.type === 'text')
-          .map((c: any) => c.text || '')
-          .join('\n');
-      }
-
-      const commentary = extractJsonFromText(text);
-      if (commentary && commentary.title && commentary.overall_summary) {
-        return commentary;
+    // Look for commentary JSON in assistant messages
+    if (turn.type === 'assistant' && turn.message?.content) {
+      for (const item of turn.message.content) {
+        if (item.type === 'text' && item.text) {
+          const found = extractJsonFromText(item.text);
+          if (found) {
+            commentary = found;
+          }
+        }
       }
     }
   }
 
-  return null;
+  return { commentary, cost, duration, turns: numTurns };
 }
 
 function formatSourceLink(source: { type: string; url?: string; description: string }): string {
@@ -94,7 +105,17 @@ function formatSourceLink(source: { type: string; url?: string; description: str
   return `- ${emoji} ${source.description}`;
 }
 
-function formatCommentaryAsMarkdown(commentary: CommentarySchema): string {
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function formatCommentaryAsMarkdown(commentary: CommentarySchema, cost: number, duration: number, turns: number): string {
   const lines: string[] = [];
 
   // Header
@@ -102,10 +123,15 @@ function formatCommentaryAsMarkdown(commentary: CommentarySchema): string {
   lines.push('');
 
   // Metadata
-  lines.push(`**Proposal ID:** ${commentary.proposal_id}`);
+  lines.push(`| | |`);
+  lines.push(`|---|---|`);
+  lines.push(`| **Proposal** | ${commentary.proposal_id} |`);
   if (commentary.canister_id) {
-    lines.push(`**Canister:** \`${commentary.canister_id}\``);
+    lines.push(`| **Canister** | \`${commentary.canister_id}\` |`);
   }
+  lines.push(`| **Analysis Cost** | $${cost.toFixed(2)} |`);
+  lines.push(`| **Duration** | ${formatDuration(duration)} |`);
+  lines.push(`| **Turns** | ${turns} |`);
   lines.push('');
 
   // Warning if incomplete
@@ -136,7 +162,8 @@ function formatCommentaryAsMarkdown(commentary: CommentarySchema): string {
     lines.push('## Commits');
     lines.push('');
     for (const commit of commentary.commit_summaries) {
-      lines.push(`### \`${commit.commit_hash.substring(0, 8)}\``);
+      const shortHash = commit.commit_hash.substring(0, 8);
+      lines.push(`### [\`${shortHash}\`](https://github.com/dfinity/ic/commit/${commit.commit_hash})`);
       lines.push('');
       lines.push(commit.summary);
       lines.push('');
@@ -145,14 +172,17 @@ function formatCommentaryAsMarkdown(commentary: CommentarySchema): string {
 
   // File Summaries
   if (commentary.file_summaries && commentary.file_summaries.length > 0) {
-    lines.push('## File Changes');
+    lines.push('<details>');
+    lines.push('<summary><strong>File Changes</strong></summary>');
     lines.push('');
     for (const file of commentary.file_summaries) {
-      lines.push(`### \`${file.file_path}\``);
+      lines.push(`#### \`${file.file_path}\``);
       lines.push('');
       lines.push(file.summary);
       lines.push('');
     }
+    lines.push('</details>');
+    lines.push('');
   }
 
   // Sources
@@ -167,14 +197,14 @@ function formatCommentaryAsMarkdown(commentary: CommentarySchema): string {
 
   // Confidence Notes
   if (commentary.confidence_notes) {
-    lines.push('## Notes');
+    lines.push('---');
     lines.push('');
-    lines.push(`> ${commentary.confidence_notes}`);
+    lines.push(`> **Note:** ${commentary.confidence_notes}`);
     lines.push('');
   }
 
   lines.push('---');
-  lines.push('*Generated by Claude Code*');
+  lines.push('*Generated by [Claude Code](https://claude.ai/code)*');
 
   return lines.join('\n');
 }
@@ -183,21 +213,27 @@ async function main() {
   const outputPath = process.argv[2] || '/home/runner/work/_temp/claude-execution-output.json';
 
   try {
-    const commentary = findCommentaryInOutput(outputPath);
+    const { commentary, cost, duration, turns } = parseClaudeOutput(outputPath);
 
     if (!commentary) {
-      console.error('Could not find valid commentary JSON in Claude output');
-      console.log('## Commentary Generation Failed');
+      console.log('## ⚠️ Commentary Generation Issue');
       console.log('');
-      console.log('Could not extract structured commentary from Claude output.');
-      process.exit(1);
+      console.log('Could not extract structured commentary JSON from Claude output.');
+      console.log('');
+      console.log(`Analysis ran for ${formatDuration(duration)} (${turns} turns, $${cost.toFixed(2)})`);
+      console.log('');
+      console.log('Check the workflow logs for details.');
+      process.exit(0);
     }
 
-    const markdown = formatCommentaryAsMarkdown(commentary);
+    const markdown = formatCommentaryAsMarkdown(commentary, cost, duration, turns);
     console.log(markdown);
 
   } catch (err) {
     console.error('Error formatting commentary:', err);
+    console.log('## ❌ Formatting Error');
+    console.log('');
+    console.log('Failed to parse Claude output file.');
     process.exit(1);
   }
 }

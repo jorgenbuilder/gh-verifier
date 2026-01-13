@@ -68,13 +68,22 @@ jobs:
 
       - name: Format commentary output
         run: |
-          # Extract and format the commentary from Claude's output
           OUTPUT_FILE="/home/runner/work/_temp/claude-execution-output.json"
+
+          # Clear the default verbose output from the action
+          echo "" > $GITHUB_STEP_SUMMARY
+
           if [ -f "$OUTPUT_FILE" ]; then
-            echo "## Proposal #${{ inputs.proposal_id }} Commentary" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            npx tsx src/format-commentary.ts "$OUTPUT_FILE" >> $GITHUB_STEP_SUMMARY 2>&1 || echo "Failed to format commentary" >> $GITHUB_STEP_SUMMARY
+            npx tsx src/format-commentary.ts "$OUTPUT_FILE" >> $GITHUB_STEP_SUMMARY 2>&1
+
+            # If formatting failed, show a message
+            if [ $? -ne 0 ]; then
+              echo "## ⚠️ Formatting Failed" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Check the workflow logs for Claude's output." >> $GITHUB_STEP_SUMMARY
+            fi
           else
-            echo "## Error" >> $GITHUB_STEP_SUMMARY
-            echo "Claude output file not found" >> $GITHUB_STEP_SUMMARY
+            echo "## ❌ Error" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Claude output file not found at \`$OUTPUT_FILE\`" >> $GITHUB_STEP_SUMMARY
           fi
