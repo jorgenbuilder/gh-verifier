@@ -63,7 +63,7 @@ if [ "$(id -u)" = "0" ]; then
         if [ -n "$step" ]; then
             echo ""
             echo ">>> Executing (as builder): $step"
-            su - builder -c "cd $(pwd) && $step"
+            su - builder -c "cd $(pwd) && DOCKER_BUILDKIT=0 $step"
         fi
     done <<< "$STEPS"
 else
@@ -72,7 +72,7 @@ else
         if [ -n "$step" ]; then
             echo ""
             echo ">>> Executing: $step"
-            eval "$step"
+            DOCKER_BUILDKIT=0 eval "$step"
         fi
     done <<< "$STEPS"
 fi
