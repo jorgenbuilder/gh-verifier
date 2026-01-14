@@ -39,10 +39,7 @@ jobs:
                          | jq -r '.cookies' 2>/dev/null || echo "")
 
           if [ -n "$COOKIES" ]; then
-            # URL-decode the cookies (curl --cookie file expects plain text, not URL-encoded)
-            DECODED=$(printf '%s' "$COOKIES" | python3 -c "import sys; from urllib.parse import unquote; print(unquote(sys.stdin.read().strip()))")
-
-            # Mask both encoded and decoded versions
+            # Mask the cookies aggressively (both full lines and individual values)
             echo "$COOKIES" | while IFS= read -r line; do
               if [ -n "$line" ]; then
                 echo "::add-mask::$line"
@@ -52,22 +49,15 @@ jobs:
               fi
             done
 
-            echo "$DECODED" | while IFS= read -r line; do
-              if [ -n "$line" ]; then
-                echo "::add-mask::$line"
-                echo "$line" | grep -o '=[^;]*' | cut -c2- | while read val; do
-                  [ -n "$val" ] && echo "::add-mask::$val"
-                done
-              fi
-            done
-
-            # Write decoded cookies to file for curl --cookie usage (NOT for Read tool)
-            echo "$DECODED" > .forum-cookies
+            # Store in environment variable for Claude Code to use
+            echo "FORUM_COOKIES<<EOF" >> $GITHUB_ENV
+            echo "$COOKIES" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
 
             echo "cookies-available=true" >> $GITHUB_OUTPUT
-            echo "✓ Cookies fetched and masked ($(wc -c < .forum-cookies) bytes)"
+            echo "✓ Cookies fetched and masked"
           else
-            echo "" > .forum-cookies
+            echo "FORUM_COOKIES=" >> $GITHUB_ENV
             echo "cookies-available=false" >> $GITHUB_OUTPUT
             echo "⚠️ No cookies available"
           fi
@@ -104,20 +94,19 @@ jobs:
 
             ## Forum Search Instructions
 
-            Authentication cookies for forum.dfinity.org are stored in `.forum-cookies` file.
+            Authentication cookies for forum.dfinity.org are available in the FORUM_COOKIES environment variable.
 
             **CRITICAL SECURITY REQUIREMENTS:**
-            - NEVER use the Read tool on .forum-cookies file
-            - NEVER cat, echo, or display the contents of .forum-cookies
-            - ONLY use it with curl's --cookie flag: `curl --cookie .forum-cookies`
+            - NEVER echo, print, or display the FORUM_COOKIES environment variable
+            - ONLY use it with curl's --cookie flag: `curl --cookie "$FORUM_COOKIES"`
             - If you encounter errors, DO NOT include cookie values in error messages
 
             To search the forum:
 
-            1. Check if .forum-cookies exists and is non-empty (use `test -s .forum-cookies`)
-            2. Use curl with --cookie flag to make requests:
+            1. Check if FORUM_COOKIES is set and non-empty (use `[ -n "$FORUM_COOKIES" ]`)
+            2. Use curl with --cookie flag to make requests (note the quotes):
                ```bash
-               curl --cookie .forum-cookies -H "Accept: application/json" \
+               curl --cookie "$FORUM_COOKIES" -H "Accept: application/json" \
                     "https://forum.dfinity.org/search.json?q=139768"
                ```
             3. Search for the proposal discussion using Discourse JSON API:
@@ -130,7 +119,7 @@ jobs:
                Headers: Authorization: Bearer ${{ secrets.FORUM_LINK_SECRET }}
                Body: {"proposalId": "{id}", "forumUrl": "{url}", "threadTitle": "{title}"}
 
-            If .forum-cookies is empty or search fails, skip forum search (this is non-fatal).
+            If FORUM_COOKIES is empty or search fails, skip forum search (this is non-fatal).
 
             ## Output Requirements
 
@@ -143,6 +132,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PORTAL_URL: ${{ secrets.PORTAL_URL }}
           FORUM_LINK_SECRET: ${{ secrets.FORUM_LINK_SECRET }}
+          FORUM_COOKIES: ${{ env.FORUM_COOKIES }}
 
       - name: Format commentary output
         if: always()
