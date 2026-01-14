@@ -28,23 +28,38 @@ jobs:
         run: npm ci
 
       - name: Fetch forum cookies for Claude Code
+        id: fetch-cookies
         env:
           COMMENTARY_SECRET: ${{ secrets.COMMENTARY_SECRET }}
           PORTAL_URL: ${{ secrets.PORTAL_URL }}
         run: |
-          echo "Fetching forum cookies for Claude Code..."
-          curl -s -H "Authorization: Bearer $COMMENTARY_SECRET" \
-               "$PORTAL_URL/api/forum-cookies" 2>/dev/null \
-               | jq -r '.cookies' > forum-cookies.txt 2>/dev/null || {
-            echo "⚠️ No cookies configured, Claude Code will skip forum search"
-            echo "" > forum-cookies.txt
-          }
+          echo "Fetching forum cookies..."
+          COOKIES=$(curl -s -H "Authorization: Bearer $COMMENTARY_SECRET" \
+                         "$PORTAL_URL/api/forum-cookies" 2>/dev/null \
+                         | jq -r '.cookies' 2>/dev/null || echo "")
 
-          if [ -s forum-cookies.txt ]; then
-            echo "✓ Cookies saved to forum-cookies.txt ($(wc -c < forum-cookies.txt) bytes)"
+          if [ -n "$COOKIES" ]; then
+            # Mask the cookies aggressively (each line AND individual cookie values)
+            echo "$COOKIES" | while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                echo "::add-mask::$line"
+                # Also mask individual cookie values (after '=')
+                echo "$line" | grep -o '=[^;]*' | cut -c2- | while read val; do
+                  [ -n "$val" ] && echo "::add-mask::$val"
+                done
+              fi
+            done
+            echo "cookies-available=true" >> $GITHUB_OUTPUT
+            echo "✓ Cookies fetched and masked"
           else
+            echo "cookies-available=false" >> $GITHUB_OUTPUT
             echo "⚠️ No cookies available"
           fi
+
+          # Save to environment file (not a regular file that Claude can read)
+          echo "FORUM_COOKIES<<EOF" >> $GITHUB_ENV
+          echo "$COOKIES" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Generate commentary with Claude Code
         id: claude
@@ -78,11 +93,18 @@ jobs:
 
             ## Forum Search Instructions
 
-            A file `forum-cookies.txt` contains authentication cookies for forum.dfinity.org.
-            If this file is non-empty, you should:
+            Forum authentication cookies are available via the FORUM_COOKIES environment variable.
 
-            1. Read the cookie file - it may contain Netscape format or raw cookie text
-            2. Use these cookies when making requests to forum.dfinity.org
+            **CRITICAL SECURITY REQUIREMENT:**
+            - NEVER read, echo, print, log, or display the FORUM_COOKIES environment variable in any output
+            - NEVER write it to a file or include it in error messages
+            - Use it ONLY in HTTP request Cookie headers
+            - Do not reference its value in your responses
+
+            If FORUM_COOKIES environment variable is set and non-empty:
+
+            1. Access the environment variable silently (do not output its value)
+            2. Use these cookies in the Cookie header when making requests to forum.dfinity.org
             3. Search for the proposal discussion using Discourse JSON API:
                - Search: GET https://forum.dfinity.org/search.json?q={proposal_id}
                - Thread: GET https://forum.dfinity.org/t/{slug}/{id}.json
@@ -93,7 +115,7 @@ jobs:
                Headers: Authorization: Bearer ${{ secrets.FORUM_LINK_SECRET }}
                Body: {"proposalId": "{id}", "forumUrl": "{url}", "threadTitle": "{title}"}
 
-            If forum-cookies.txt is empty or search fails, skip forum search (this is non-fatal).
+            If FORUM_COOKIES is empty or search fails, skip forum search (this is non-fatal).
 
             ## Output Requirements
 
@@ -106,6 +128,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PORTAL_URL: ${{ secrets.PORTAL_URL }}
           FORUM_LINK_SECRET: ${{ secrets.FORUM_LINK_SECRET }}
+          FORUM_COOKIES: ${{ env.FORUM_COOKIES }}
 
       - name: Format commentary output
         if: always()

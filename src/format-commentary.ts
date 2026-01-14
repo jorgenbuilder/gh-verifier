@@ -209,6 +209,29 @@ function formatCommentaryAsMarkdown(commentary: CommentarySchema, cost: number, 
   return lines.join('\n');
 }
 
+function redactSecrets(text: string): string {
+  let redacted = text;
+
+  // Redact cookie patterns (key=value format)
+  // Matches common cookie patterns like _forum_session=abc123; _t=xyz789
+  redacted = redacted.replace(/(_[a-z_]+)=([^;\s]{10,})/gi, '$1=[REDACTED]');
+
+  // Redact bearer tokens
+  redacted = redacted.replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, 'Bearer [REDACTED]');
+
+  // Redact common cookie names with their values
+  const cookieNames = ['_forum_session', '_t', 'session_id', 'auth_token', '__profilin', '__Host-session'];
+  cookieNames.forEach(name => {
+    const pattern = new RegExp(`${name}=[^;\\s]+`, 'gi');
+    redacted = redacted.replace(pattern, `${name}=[REDACTED]`);
+  });
+
+  // Redact long base64-like strings that might be tokens
+  redacted = redacted.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '[REDACTED_TOKEN]');
+
+  return redacted;
+}
+
 async function main() {
   const outputPath = process.argv[2] || '/home/runner/work/_temp/claude-execution-output.json';
 
@@ -227,7 +250,9 @@ async function main() {
     }
 
     const markdown = formatCommentaryAsMarkdown(commentary, cost, duration, turns);
-    console.log(markdown);
+    // Redact any secrets that may have leaked into the output
+    const redacted = redactSecrets(markdown);
+    console.log(redacted);
 
   } catch (err) {
     console.error('Error formatting commentary:', err);
