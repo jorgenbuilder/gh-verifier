@@ -104,17 +104,18 @@ jobs:
             To search the forum:
 
             1. Check if FORUM_COOKIES is set and non-empty (use `[ -n "$FORUM_COOKIES" ]`)
-            2. Use curl with --cookie flag to make requests (note the quotes):
+            2. Use curl to get raw JSON (DO NOT use jq - you will parse the JSON yourself):
                ```bash
                curl --cookie "$FORUM_COOKIES" -H "Accept: application/json" \
-                    "https://forum.dfinity.org/search.json?q=139768"
+                    "https://forum.dfinity.org/search.json?q=139768" 2>/dev/null
                ```
-            3. Search for the proposal discussion using Discourse JSON API:
+            3. Parse the JSON response yourself to find relevant threads
+            4. Search for the proposal discussion using Discourse JSON API:
                - Search: GET https://forum.dfinity.org/search.json?q={proposal_id}
                - Thread: GET https://forum.dfinity.org/t/{slug}/{id}.json
-            4. Filter results to "NNS Proposal Discussions" category (category_id: 76)
-            5. Verify the proposal ID appears in the first post of the thread
-            6. If found, post the URL to the portal using:
+            5. Filter results to "NNS Proposal Discussions" category (category_id: 76)
+            6. Verify the proposal ID appears in the first post of the thread
+            7. If found, post the URL to the portal using:
                POST ${{ secrets.PORTAL_URL }}/api/forum-links
                Headers: Authorization: Bearer ${{ secrets.FORUM_LINK_SECRET }}
                Body: {"proposalId": "{id}", "forumUrl": "{url}", "threadTitle": "{title}"}
