@@ -39,19 +39,30 @@ jobs:
                          | jq -r '.cookies' 2>/dev/null || echo "")
 
           if [ -n "$COOKIES" ]; then
-            # Mask the cookies aggressively
+            # URL-decode the cookies (curl --cookie file expects plain text, not URL-encoded)
+            DECODED=$(printf '%s' "$COOKIES" | python3 -c "import sys; from urllib.parse import unquote; print(unquote(sys.stdin.read().strip()))")
+
+            # Mask both encoded and decoded versions
             echo "$COOKIES" | while IFS= read -r line; do
               if [ -n "$line" ]; then
                 echo "::add-mask::$line"
-                # Also mask individual cookie values
                 echo "$line" | grep -o '=[^;]*' | cut -c2- | while read val; do
                   [ -n "$val" ] && echo "::add-mask::$val"
                 done
               fi
             done
 
-            # Write to file for curl --cookie usage (NOT for Read tool)
-            echo "$COOKIES" > .forum-cookies
+            echo "$DECODED" | while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                echo "::add-mask::$line"
+                echo "$line" | grep -o '=[^;]*' | cut -c2- | while read val; do
+                  [ -n "$val" ] && echo "::add-mask::$val"
+                done
+              fi
+            done
+
+            # Write decoded cookies to file for curl --cookie usage (NOT for Read tool)
+            echo "$DECODED" > .forum-cookies
 
             echo "cookies-available=true" >> $GITHUB_OUTPUT
             echo "✓ Cookies fetched and masked ($(wc -c < .forum-cookies) bytes)"
