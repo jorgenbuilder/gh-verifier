@@ -39,21 +39,38 @@ jobs:
           # Configure podman to use vfs storage driver (overlay-on-overlay not supported)
           mkdir -p /etc/containers
           cat > /etc/containers/storage.conf << 'EOF'
-          [storage]
-          driver = "vfs"
-          EOF
+[storage]
+driver = "vfs"
+runroot = "/run/containers/storage"
+graphroot = "/var/lib/containers/storage"
+EOF
 
           # Also configure for builder user
           mkdir -p /home/builder/.config/containers
-          cp /etc/containers/storage.conf /home/builder/.config/containers/ 2>/dev/null || true
+          cat > /home/builder/.config/containers/storage.conf << 'EOF'
+[storage]
+driver = "vfs"
+runroot = "/run/user/1000/containers"
+graphroot = "/home/builder/.local/share/containers/storage"
+EOF
+          chown -R builder:builder /home/builder/.config 2>/dev/null || true
+
+          # Create storage directories
+          mkdir -p /var/lib/containers/storage /run/containers/storage
+          mkdir -p /home/builder/.local/share/containers/storage /run/user/1000/containers
+          chown -R builder:builder /home/builder/.local /run/user/1000 2>/dev/null || true
 
       - name: Free up disk space
         run: |
           echo "Disk space before cleanup:"
           df -h
-          # Remove unnecessary files
-          rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          # Remove unnecessary files to maximize available space
+          rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache || true
+          rm -rf /usr/local/share/boost /usr/share/swift || true
+          rm -rf /var/lib/apt/lists/* /tmp/* || true
           docker system prune -af --volumes || true
+          # Clean podman storage if exists
+          podman system prune -af 2>/dev/null || true
           echo "Disk space after cleanup:"
           df -h
 
@@ -75,6 +92,9 @@ jobs:
         run: bash scripts/build.sh
         env:
           DOCKER_BUILDKIT: 0
+          # Tell podman/buildah to not use cgroups (needed in nested container)
+          BUILDAH_ISOLATION: chroot
+          STORAGE_DRIVER: vfs
 
       - name: Install didc (for arg hash verification)
         if: steps.fetch.outputs.skipped != 'true'

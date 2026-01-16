@@ -79,7 +79,7 @@ if [ "$(id -u)" = "0" ]; then
         if [ -n "$step" ]; then
             echo ""
             echo ">>> Executing (as builder): $step"
-            su - builder -c "cd $(pwd) && export DOCKER_BUILDKIT=0 && $step" || {
+            su - builder -c "cd $(pwd) && export DOCKER_BUILDKIT=0 BUILDAH_ISOLATION=chroot STORAGE_DRIVER=vfs && $step" || {
                 echo "Warning: Build command returned non-zero exit code: $?"
                 echo "Checking if build artifacts were produced anyway..."
             }
