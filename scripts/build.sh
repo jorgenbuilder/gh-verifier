@@ -76,9 +76,23 @@ if [[ "$REPO_URL" == *"github.com/dfinity/ic"* ]]; then
     fi
 fi
 
-# Patch any scripts that force DOCKER_BUILDKIT=1
-echo "Patching docker-build scripts to disable BuildKit..."
-find . -name "docker-build" -type f -exec sed -i 's/export DOCKER_BUILDKIT=1/export DOCKER_BUILDKIT=0/g' {} \;
+# Per-repo BuildKit handling
+# The IC build container lacks the buildx plugin, so BuildKit fails by default.
+# IC monorepo: disable BuildKit (uses Bazel, not docker build)
+# exchange-rate-canister: needs BuildKit for --output flag, so install buildx
+# Other repos: disable BuildKit as a safe default
+if [[ "$REPO_URL" == *"dfinity/exchange-rate-canister"* ]]; then
+    echo "Installing docker buildx plugin for BuildKit support..."
+    mkdir -p /usr/local/lib/docker/cli-plugins
+    BUILDX_VERSION="v0.20.1"
+    curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" \
+        -o /usr/local/lib/docker/cli-plugins/docker-buildx
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+    echo "Installed buildx ${BUILDX_VERSION}"
+else
+    echo "Patching docker-build scripts to disable BuildKit..."
+    find . -name "docker-build" -type f -exec sed -i 's/export DOCKER_BUILDKIT=1/export DOCKER_BUILDKIT=0/g' {} \;
+fi
 
 echo ""
 echo "=== Running build steps ==="
@@ -149,35 +163,48 @@ if [ "$TARGETED_BUILD_SUCCESS" = false ]; then
     echo ""
     echo "=== Running full build ==="
 
-    # Create marker file to prevent nested container spawning
-    # The IC build scripts check for /home/ubuntu/.ic-build-container to detect
-    # if they're already running inside the ic-build container
-    mkdir -p /home/ubuntu
-    touch /home/ubuntu/.ic-build-container
-    echo "Created /home/ubuntu/.ic-build-container marker file"
-
     # Read build steps
     STEPS=$(node -e "JSON.parse(require('fs').readFileSync('../build-steps.json')).steps.forEach(s => console.log(s))")
 
-    if setup_builder_user; then
-        # Execute each step as builder user
-        while IFS= read -r step; do
-            if [ -n "$step" ]; then
-                echo ""
-                echo ">>> Executing (as builder): $step"
-                su - builder -c "cd $(pwd) && export DOCKER_BUILDKIT=0 DFINITY_CONTAINER=${DFINITY_CONTAINER:-} && $step" || {
-                    echo "Warning: Build command returned non-zero exit code: $?"
-                    echo "Checking if build artifacts were produced anyway..."
-                }
-            fi
-        done <<< "$STEPS"
+    if [ "$IS_IC_MONOREPO" = true ]; then
+        # IC monorepo: create marker file to prevent nested container spawning
+        # The IC build scripts check for /home/ubuntu/.ic-build-container to detect
+        # if they're already running inside the ic-build container
+        mkdir -p /home/ubuntu
+        touch /home/ubuntu/.ic-build-container
+        echo "Created /home/ubuntu/.ic-build-container marker file"
+
+        if setup_builder_user; then
+            # Execute each step as builder user (bazel's rules_python requires non-root)
+            while IFS= read -r step; do
+                if [ -n "$step" ]; then
+                    echo ""
+                    echo ">>> Executing (as builder): $step"
+                    su - builder -c "cd $(pwd) && export DOCKER_BUILDKIT=0 DFINITY_CONTAINER=${DFINITY_CONTAINER:-} && $step" || {
+                        echo "Warning: Build command returned non-zero exit code: $?"
+                        echo "Checking if build artifacts were produced anyway..."
+                    }
+                fi
+            done <<< "$STEPS"
+        else
+            # Execute each step with IC-specific env vars
+            while IFS= read -r step; do
+                if [ -n "$step" ]; then
+                    echo ""
+                    echo ">>> Executing: $step"
+                    export DOCKER_BUILDKIT=0 DFINITY_CONTAINER=${DFINITY_CONTAINER:-} && eval "$step"
+                fi
+            done <<< "$STEPS"
+        fi
     else
-        # Execute each step normally
+        # Standard repos: run steps directly in the same shell so that
+        # environment variables (e.g. export IP_SUPPORT=ipv4) persist
+        # across steps. No builder user or IC marker file needed.
         while IFS= read -r step; do
             if [ -n "$step" ]; then
                 echo ""
                 echo ">>> Executing: $step"
-                export DOCKER_BUILDKIT=0 DFINITY_CONTAINER=${DFINITY_CONTAINER:-} && eval "$step"
+                eval "$step"
             fi
         done <<< "$STEPS"
     fi
