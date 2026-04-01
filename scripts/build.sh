@@ -94,6 +94,43 @@ else
     find . -name "docker-build" -type f -exec sed -i 's/export DOCKER_BUILDKIT=1/export DOCKER_BUILDKIT=0/g' {} \;
 fi
 
+# Docker-in-Docker volume mount fix
+# When running inside a container (e.g. ic-build on GitHub Actions), the Docker
+# daemon runs on the host. Volume mounts like -v "$(pwd):/app" resolve to a
+# container-internal path that doesn't exist on the host, so the mount silently
+# creates an empty directory. Fix: rewrite docker run -v commands to use
+# docker create + docker cp instead.
+echo "Patching Docker volume mounts for container-in-container compatibility..."
+find . -name "*.sh" -type f | while read -r script; do
+    if grep -qE 'docker run[^;|]*-v\s+["\x27]?\$(\(pwd\)|PWD):' "$script"; then
+        echo "  Patching DinD volume mounts in: $script"
+        node -e "
+const fs = require('fs');
+let content = fs.readFileSync('$script', 'utf8');
+// Match: docker run [flags] -v \"\$(pwd):/path\" IMAGE CMD
+// Rewrite to: docker create + docker cp + docker start + docker cp + docker rm
+content = content.replace(
+    /^(\s*)docker run\s+(.*?)-v\s+[\"']?\\\$\(pwd\):([^\s\"']+)[\"']?\s+(.*?)\s+(\S+)\s+(.+)$/mg,
+    (match, indent, preFlags, mountPath, postFlags, image, cmd) => {
+        // Remove --rm from flags since we need the container to persist for docker cp
+        const flags = (preFlags + ' ' + postFlags).replace(/--rm/g, '').trim();
+        const lines = [
+            indent + '_GHV_CID=\$(docker create ' + (flags ? flags + ' ' : '') + image + ' ' + cmd + ')',
+            indent + 'docker cp . \"\$_GHV_CID:' + mountPath + '\"',
+            indent + 'docker start -a \"\$_GHV_CID\"',
+            indent + '_GHV_RC=\$?',
+            indent + 'docker cp \"\$_GHV_CID:' + mountPath + '/.\" .',
+            indent + 'docker rm \"\$_GHV_CID\" >/dev/null',
+            indent + '[ \$_GHV_RC -eq 0 ] || exit \$_GHV_RC',
+        ];
+        return lines.join('\n');
+    }
+);
+fs.writeFileSync('$script', content);
+"
+    fi
+done
+
 echo ""
 echo "=== Running build steps ==="
 
