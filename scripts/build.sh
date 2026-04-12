@@ -134,6 +134,10 @@ content = content.replace(
 );
 fs.writeFileSync('MODULE.bazel', content);
 "
+    # Hide modifications from git so workspace_status.sh doesn't stamp "-dirty"
+    git update-index --assume-unchanged MODULE.bazel
+    echo "bazel/pigz_patches/" >> .git/info/exclude
+
     echo "  pigz override injected successfully"
 fi
 
