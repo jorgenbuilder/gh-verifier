@@ -76,6 +76,60 @@ if [[ "$REPO_URL" == *"github.com/dfinity/ic"* ]]; then
     fi
 fi
 
+# Pigz upstream checksum fix (IC monorepo only)
+# The pigz-2.8 tarball at zlib.net periodically changes contents, breaking the
+# checksum that the Bazel Central Registry expects. Use archive_override to
+# redirect the download to the stable GitHub mirror and supply the BCR patches.
+if [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ]; then
+    echo "Patching MODULE.bazel to use GitHub mirror for pigz..."
+    PIGZ_PATCHES_DIR="$(pwd)/bazel/pigz_patches"
+    mkdir -p "$PIGZ_PATCHES_DIR"
+
+    # Download the BCR patches for pigz 2.8
+    BCR_BASE="https://raw.githubusercontent.com/bazelbuild/bazel-central-registry/main/modules/pigz/2.8/patches"
+    for patch in add_build_file.patch module_dot_bazel.patch pigz.c.patch; do
+        curl -fsSL "$BCR_BASE/$patch" -o "$PIGZ_PATCHES_DIR/$patch"
+    done
+
+    # Download the GitHub tarball and compute its integrity hash
+    PIGZ_TARBALL="/tmp/pigz-2.8-github.tar.gz"
+    curl -fsSL "https://github.com/madler/pigz/archive/refs/tags/v2.8.tar.gz" -o "$PIGZ_TARBALL"
+    PIGZ_INTEGRITY="sha256-$(openssl dgst -sha256 -binary "$PIGZ_TARBALL" | openssl base64 -A)"
+    echo "  pigz GitHub tarball integrity: $PIGZ_INTEGRITY"
+
+    # Inject archive_override after the bazel_dep for pigz
+    node -e "
+const fs = require('fs');
+let content = fs.readFileSync('MODULE.bazel', 'utf8');
+const override = \`
+archive_override(
+    module_name = \"pigz\",
+    urls = [\"https://github.com/madler/pigz/archive/refs/tags/v2.8.tar.gz\"],
+    integrity = \"${PIGZ_INTEGRITY}\",
+    strip_prefix = \"pigz-2.8\",
+    patches = [
+        \"//bazel/pigz_patches:add_build_file.patch\",
+        \"//bazel/pigz_patches:module_dot_bazel.patch\",
+        \"//bazel/pigz_patches:pigz.c.patch\",
+    ],
+    patch_strip = 0,
+)
+\`;
+content = content.replace(
+    /(bazel_dep\\(name\\s*=\\s*\"pigz\"[^)]*\\))/,
+    '\$1' + override
+);
+fs.writeFileSync('MODULE.bazel', content);
+"
+
+    # Create BUILD.bazel for the patches directory so Bazel can find them
+    cat > "$PIGZ_PATCHES_DIR/BUILD.bazel" << 'PATCHEOF'
+exports_files(glob(["*.patch"]))
+PATCHEOF
+
+    echo "  pigz override injected successfully"
+fi
+
 # Per-repo BuildKit handling
 # The IC build container lacks the buildx plugin, so BuildKit fails by default.
 # IC monorepo: disable BuildKit (uses Bazel, not docker build)
