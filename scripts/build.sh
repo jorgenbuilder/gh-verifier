@@ -76,42 +76,55 @@ if [[ "$REPO_URL" == *"github.com/dfinity/ic"* ]]; then
     fi
 fi
 
-# Pigz upstream checksum fix (IC monorepo only)
+# Pigz upstream URL fix (IC monorepo only)
 # The pigz-2.8 tarball at zlib.net periodically changes contents, breaking the
-# checksum that the Bazel Central Registry expects. Use archive_override to
-# redirect the download to the stable GitHub mirror and supply the BCR patches.
-if [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ]; then
-    echo "Patching MODULE.bazel to use GitHub mirror for pigz..."
+# checksum that the Bazel Central Registry expects. Add the Wayback Machine as
+# a mirror URL so Bazel can fetch the original tarball with the correct hash.
+if [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ] && grep -q 'bazel_dep(name = "pigz"' MODULE.bazel; then
+    echo "Patching MODULE.bazel to add Wayback Machine mirror for pigz..."
+
+    # Read the expected integrity from the BCR source.json
+    PIGZ_BCR_SOURCE=$(curl -fsSL "https://raw.githubusercontent.com/bazelbuild/bazel-central-registry/main/modules/pigz/2.8/source.json")
+    PIGZ_INTEGRITY=$(echo "$PIGZ_BCR_SOURCE" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).integrity)")
+    PIGZ_ORIGINAL_URL=$(echo "$PIGZ_BCR_SOURCE" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).url)")
+    PIGZ_STRIP_PREFIX=$(echo "$PIGZ_BCR_SOURCE" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).strip_prefix)")
+    echo "  BCR integrity: $PIGZ_INTEGRITY"
+    echo "  Original URL: $PIGZ_ORIGINAL_URL"
+
+    # Collect BCR patches
     PIGZ_PATCHES_DIR="$(pwd)/bazel/pigz_patches"
     mkdir -p "$PIGZ_PATCHES_DIR"
-
-    # Download the BCR patches for pigz 2.8
+    PATCH_NAMES=$(echo "$PIGZ_BCR_SOURCE" | node -e "
+const src = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+process.stdout.write(Object.keys(src.patches || {}).join(' '));
+")
     BCR_BASE="https://raw.githubusercontent.com/bazelbuild/bazel-central-registry/main/modules/pigz/2.8/patches"
-    for patch in add_build_file.patch module_dot_bazel.patch pigz.c.patch; do
+    PATCH_LABELS=""
+    for patch in $PATCH_NAMES; do
         curl -fsSL "$BCR_BASE/$patch" -o "$PIGZ_PATCHES_DIR/$patch"
+        PATCH_LABELS="$PATCH_LABELS \"//bazel/pigz_patches:$patch\","
     done
+    cat > "$PIGZ_PATCHES_DIR/BUILD.bazel" << 'PATCHEOF'
+exports_files(glob(["*.patch"]))
+PATCHEOF
 
-    # Download the GitHub tarball and compute its integrity hash
-    PIGZ_TARBALL="/tmp/pigz-2.8-github.tar.gz"
-    curl -fsSL "https://github.com/madler/pigz/archive/refs/tags/v2.8.tar.gz" -o "$PIGZ_TARBALL"
-    PIGZ_INTEGRITY="sha256-$(openssl dgst -sha256 -binary "$PIGZ_TARBALL" | openssl base64 -A)"
-    echo "  pigz GitHub tarball integrity: $PIGZ_INTEGRITY"
+    # Wayback Machine mirror for the original tarball (serves exact same bytes)
+    PIGZ_WAYBACK_URL="https://web.archive.org/web/2024/${PIGZ_ORIGINAL_URL}"
 
-    # Inject archive_override after the bazel_dep for pigz
+    # Inject archive_override with both original and Wayback Machine URLs
     node -e "
 const fs = require('fs');
 let content = fs.readFileSync('MODULE.bazel', 'utf8');
 const override = \`
 archive_override(
     module_name = \"pigz\",
-    urls = [\"https://github.com/madler/pigz/archive/refs/tags/v2.8.tar.gz\"],
-    integrity = \"${PIGZ_INTEGRITY}\",
-    strip_prefix = \"pigz-2.8\",
-    patches = [
-        \"//bazel/pigz_patches:add_build_file.patch\",
-        \"//bazel/pigz_patches:module_dot_bazel.patch\",
-        \"//bazel/pigz_patches:pigz.c.patch\",
+    urls = [
+        \"${PIGZ_ORIGINAL_URL}\",
+        \"${PIGZ_WAYBACK_URL}\",
     ],
+    integrity = \"${PIGZ_INTEGRITY}\",
+    strip_prefix = \"${PIGZ_STRIP_PREFIX}\",
+    patches = [${PATCH_LABELS}],
     patch_strip = 0,
 )
 \`;
@@ -121,12 +134,6 @@ content = content.replace(
 );
 fs.writeFileSync('MODULE.bazel', content);
 "
-
-    # Create BUILD.bazel for the patches directory so Bazel can find them
-    cat > "$PIGZ_PATCHES_DIR/BUILD.bazel" << 'PATCHEOF'
-exports_files(glob(["*.patch"]))
-PATCHEOF
-
     echo "  pigz override injected successfully"
 fi
 
