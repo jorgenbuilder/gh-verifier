@@ -302,11 +302,23 @@ if [ "$TARGETED_BUILD_SUCCESS" = false ]; then
         # Standard repos: run steps directly in the same shell so that
         # environment variables (e.g. export IP_SUPPORT=ipv4) persist
         # across steps. No builder user or IC marker file needed.
+        #
+        # Retry once on failure. Targets transient docker-in-docker network
+        # flakes (apt mirror timeouts, registry hiccups) without changing
+        # build output — retries re-run the same $step, and Docker layer
+        # cache means only the failing layer re-executes.
         while IFS= read -r step; do
             if [ -n "$step" ]; then
                 echo ""
                 echo ">>> Executing: $step"
-                eval "$step"
+                if eval "$step"; then
+                    :
+                else
+                    rc=$?
+                    echo ">>> Step failed (exit $rc). Retrying once in 30s..."
+                    sleep 30
+                    eval "$step"
+                fi
             fi
         done <<< "$STEPS"
     fi
