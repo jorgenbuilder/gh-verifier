@@ -1,8 +1,16 @@
 import { HttpAgent, Actor } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
+import { IDL } from '@dfinity/candid';
 import { writeFileSync, appendFileSync } from 'fs';
+import { createHash } from 'crypto';
 
 const GOVERNANCE_CANISTER_ID = 'rrkah-fqaaa-aaaaa-aaaaq-cai';
+
+// NnsFunction ids for the legacy ExecuteNnsFunction action. Both embed the full
+// wasm module in their payload. Source: dfinity/ic
+// rs/nns/governance/proto/ic_nns_governance/pb/v1/governance.proto
+const NNS_FUNCTION_NNS_CANISTER_INSTALL = 3;
+const NNS_FUNCTION_NNS_CANISTER_UPGRADE = 4;
 
 function setGitHubOutput(name: string, value: string) {
   const outputFile = process.env.GITHUB_OUTPUT;
@@ -27,6 +35,13 @@ const governanceIdl = ({ IDL }: { IDL: any }) => {
     settings: IDL.Opt(IDL.Record({})),
   });
 
+  // Legacy code action. NnsCanisterInstall/Upgrade carry the full wasm module in
+  // the payload blob, which we decode and hash ourselves.
+  const ExecuteNnsFunction = IDL.Record({
+    nns_function: IDL.Int32,
+    payload: IDL.Vec(IDL.Nat8),
+  });
+
   const ProposalInfo = IDL.Record({
     id: IDL.Opt(IDL.Record({ id: IDL.Nat64 })),
     proposer: IDL.Opt(IDL.Record({ id: IDL.Nat64 })),
@@ -37,6 +52,7 @@ const governanceIdl = ({ IDL }: { IDL: any }) => {
       action: IDL.Opt(IDL.Variant({
         InstallCode: InstallCode,
         UpdateCanisterSettings: UpdateCanisterSettings,
+        ExecuteNnsFunction: ExecuteNnsFunction,
         // Other action types will be captured as unknown variants
       })),
     })),
@@ -69,6 +85,18 @@ function extractCommitHash(text: string): string | null {
 
 function bytesToHex(bytes: number[] | Uint8Array): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// NnsCanisterInstall (AddNnsCanisterProposalPayload) and NnsCanisterUpgrade
+// (ChangeNnsCanisterProposalPayload) both embed the full module in a
+// `wasm_module: blob` field. Candid record subtyping lets us decode just that
+// field; its SHA-256 is the wasm hash the dashboard displays and what we verify
+// the reproduced build against.
+export function legacyWasmHashFromPayload(payload: number[]): string {
+  const PayloadWithWasm = IDL.Record({ wasm_module: IDL.Vec(IDL.Nat8) });
+  const [decoded] = IDL.decode([PayloadWithWasm], Uint8Array.from(payload).buffer) as any[];
+  const wasm = Uint8Array.from(decoded.wasm_module);
+  return createHash('sha256').update(wasm).digest('hex');
 }
 
 async function main() {
@@ -118,59 +146,74 @@ async function main() {
   const summary = proposal.summary || '';
   const url = proposal.url || '';
 
-  // Check if this is an InstallCode action (code upgrade)
-  // Other action types (UpdateCanisterSettings, etc.) don't have code to verify
+  // Determine what kind of action this proposal carries:
+  //  - InstallCode: modern action; wasm/arg hashes are onchain directly.
+  //  - ExecuteNnsFunction NnsCanisterInstall/Upgrade: legacy action that embeds
+  //    the full wasm module in its payload, which we decode and hash ourselves.
+  //  - anything else: no canister code, so there is nothing to verify -> skip.
   const action = proposal.action?.[0];
 
-  if (!action) {
-    console.log('');
-    console.log('⏭️  SKIPPED: Proposal has no action data');
-    console.log('');
-    setGitHubOutput('skipped', 'true');
-    setGitHubOutput('skip_reason', 'no_action_data');
-    process.exit(0);
-  }
+  let expectedWasmHash: string | null = null;
+  let expectedArgHash: string | null = null;
+  let canisterId: string | null = null;
 
-  if (!action.InstallCode) {
-    // Determine the action type for logging
-    const actionType = Object.keys(action)[0] || 'Unknown';
+  if (action?.InstallCode) {
+    const installCode = action.InstallCode;
+    if (installCode.wasm_module_hash?.[0]) {
+      expectedWasmHash = bytesToHex(installCode.wasm_module_hash[0]);
+    }
+    if (installCode.arg_hash?.[0]) {
+      expectedArgHash = bytesToHex(installCode.arg_hash[0]);
+    }
+    if (installCode.canister_id?.[0]) {
+      canisterId = installCode.canister_id[0].toText();
+    }
+  } else if (
+    action?.ExecuteNnsFunction &&
+    (action.ExecuteNnsFunction.nns_function === NNS_FUNCTION_NNS_CANISTER_INSTALL ||
+      action.ExecuteNnsFunction.nns_function === NNS_FUNCTION_NNS_CANISTER_UPGRADE)
+  ) {
+    const fn = action.ExecuteNnsFunction.nns_function;
+    const fnName =
+      fn === NNS_FUNCTION_NNS_CANISTER_INSTALL ? 'NnsCanisterInstall' : 'NnsCanisterUpgrade';
+    console.log(`Legacy code action: ExecuteNnsFunction / ${fnName} (nns_function=${fn})`);
+    console.log('Decoding embedded wasm_module from payload to derive the expected hash...');
+    try {
+      expectedWasmHash = legacyWasmHashFromPayload(action.ExecuteNnsFunction.payload);
+    } catch (err) {
+      console.error('Error: failed to decode wasm_module from ExecuteNnsFunction payload:', err);
+      process.exit(1);
+    }
+    // The wasm is embedded directly; there is no separately-encoded upgrade arg
+    // to reproduce from source, so we verify the wasm hash only.
+  } else {
+    const actionType = action ? Object.keys(action)[0] || 'Unknown' : 'no_action_data';
     console.log('');
     console.log('═══════════════════════════════════════════════════════════════');
-    console.log('  ⏭️  SKIPPED: NOT A CODE UPGRADE PROPOSAL');
+    console.log('  ⏭️  SKIPPED: NOT A CODE PROPOSAL');
     console.log('═══════════════════════════════════════════════════════════════');
     console.log('');
     console.log(`  Proposal ID:   ${proposalId}`);
     console.log(`  Title:         ${title}`);
     console.log(`  Action Type:   ${actionType}`);
     console.log('');
-    console.log('  This proposal does not install code, so there is no WASM to verify.');
-    console.log('  Only InstallCode proposals require build verification.');
+    console.log('  This proposal does not install or upgrade canister code, so');
+    console.log('  there is no WASM to verify.');
     console.log('');
+    // Make the run page honest: a skip is NOT a verification pass.
+    const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+    if (summaryFile) {
+      appendFileSync(
+        summaryFile,
+        `## ⏭️ Verification skipped\n\n` +
+          `Proposal #${proposalId} (action: \`${actionType}\`) does not install or ` +
+          `upgrade canister code, so there is nothing to build. ` +
+          `**This is not a build verification.**\n`
+      );
+    }
     setGitHubOutput('skipped', 'true');
     setGitHubOutput('skip_reason', actionType);
     process.exit(0);
-  }
-
-  // Extract wasm_module_hash and arg_hash directly from InstallCode action
-  let expectedWasmHash: string | null = null;
-  let expectedArgHash: string | null = null;
-  let canisterId: string | null = null;
-
-  const installCode = action.InstallCode;
-
-  // Extract wasm_module_hash from bytes
-  if (installCode.wasm_module_hash?.[0]) {
-    expectedWasmHash = bytesToHex(installCode.wasm_module_hash[0]);
-  }
-
-  // Extract arg_hash from bytes (upgrade arguments hash)
-  if (installCode.arg_hash?.[0]) {
-    expectedArgHash = bytesToHex(installCode.arg_hash[0]);
-  }
-
-  // Extract canister_id
-  if (installCode.canister_id?.[0]) {
-    canisterId = installCode.canister_id[0].toText();
   }
 
   // Extract commit hash from summary text
@@ -194,13 +237,13 @@ async function main() {
   console.log(`  Target Canister:   ${canisterId || 'Not found'}`);
   console.log(`  Source Commit:     ${commitHash || 'Not found'}`);
   console.log('');
-  console.log('ONCHAIN WASM HASH (from proposal.action.InstallCode.wasm_module_hash):');
+  console.log('EXPECTED WASM HASH (onchain):');
   console.log(`  ${expectedWasmHash || 'Not found'}`);
   console.log('');
-  console.log('ONCHAIN ARG HASH (from proposal.action.InstallCode.arg_hash):');
-  console.log(`  ${expectedArgHash || 'Not found (no upgrade arguments)'}`);
+  console.log('EXPECTED ARG HASH (onchain):');
+  console.log(`  ${expectedArgHash || 'Not found (no separate upgrade arguments)'}`);
   console.log('');
-  console.log('These hashes were extracted directly from the onchain proposal payload,');
+  console.log('These hashes are derived directly from the onchain proposal payload,');
   console.log('not from the human-readable summary text.');
   console.log('─────────────────────────────────────────────────────────────────');
 
@@ -217,7 +260,10 @@ async function main() {
   console.log('Wrote proposal.json');
 }
 
-main().catch((err) => {
-  console.error('Error fetching proposal:', err);
-  process.exit(1);
-});
+// Only run main() when executed directly, not when imported by tests
+if (!process.env.VITEST) {
+  main().catch((err) => {
+    console.error('Error fetching proposal:', err);
+    process.exit(1);
+  });
+}
