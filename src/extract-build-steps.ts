@@ -82,7 +82,10 @@ async function callGemini(prompt: string): Promise<string> {
     contents: prompt,
     config: {
       temperature: 0.1,
-      maxOutputTokens: 1024,
+      // gemini-2.5 models spend output tokens on internal "thinking" before the
+      // answer. 1024 was too tight: thinking consumed the budget and truncated
+      // the JSON mid-string. The JSON itself is tiny; give generous headroom.
+      maxOutputTokens: 8192,
     },
   });
 
