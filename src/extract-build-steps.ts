@@ -72,8 +72,13 @@ async function callGemini(prompt: string): Promise<string> {
 
   const ai = new GoogleGenAI({ apiKey });
 
+  // Overridable so a future model deprecation is a config change, not a code
+  // change. gemini-2.0-flash was retired by Google (404 "no longer available").
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  console.log(`Using Gemini model: ${model}`);
+
   const response = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
+    model,
     contents: prompt,
     config: {
       temperature: 0.1,
@@ -84,7 +89,7 @@ async function callGemini(prompt: string): Promise<string> {
   return response.text || '';
 }
 
-function parseGeminiResponse(response: string): { repoUrl: string; steps: string[]; wasmOutputPath: string; upgradeArgs: string | null } {
+function parseGeminiResponse(response: string): { repoUrl: string; steps: string[]; wasmOutputPath: string; upgradeArgs: string | null; upgradeArgsDid: string | null; upgradeArgsType: string | null } {
   // Try to extract JSON from the response
   let jsonStr = response.trim();
 
