@@ -91,18 +91,21 @@ jobs:
       RUN_ID: ${{ github.event.workflow_run.id }}
       RUN_URL: ${{ github.event.workflow_run.html_url }}
       PROPOSAL_ID: ${{ needs.triage.outputs.proposal_id }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Claude Code authenticates with the OAuth token from `claude setup-token`.
+      # Do NOT also set ANTHROPIC_API_KEY here — the CLI prefers it if present, and
+      # this repo's key is currently invalid.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     steps:
-      - name: Require ANTHROPIC_API_KEY
+      - name: Require Claude credentials
         run: |
           set -euo pipefail
-          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
             gh issue create -R "$GITHUB_REPOSITORY" \
-              --title "Auto-fix disabled: missing ANTHROPIC_API_KEY (proposal #$PROPOSAL_ID)" \
-              --body "Verify failed for #$PROPOSAL_ID and the auto-fix loop tried to run, but this repo has no \`ANTHROPIC_API_KEY\` secret. Add it under Settings → Secrets and variables → Actions to enable automatic fixes.
+              --title "Auto-fix disabled: missing CLAUDE_CODE_OAUTH_TOKEN (proposal #$PROPOSAL_ID)" \
+              --body "Verify failed for #$PROPOSAL_ID and the auto-fix loop tried to run, but this repo has no \`CLAUDE_CODE_OAUTH_TOKEN\` secret. Generate one locally with \`claude setup-token\` and add it under Settings → Secrets and variables → Actions.
 
           Failed run: $RUN_URL" || true
-            echo "::error::No ANTHROPIC_API_KEY secret; cannot run the auto-fix loop."
+            echo "::error::No CLAUDE_CODE_OAUTH_TOKEN secret; cannot run the auto-fix loop."
             exit 1
           fi
 
@@ -147,6 +150,18 @@ jobs:
             > /tmp/claude-output.txt 2>&1 || true
           echo "----- Claude output (tail) -----"
           tail -c 4000 /tmp/claude-output.txt || true
+
+          # Fail loudly on auth problems instead of letting an empty result look
+          # like "Claude found no fix". Open a clear issue and stop the job.
+          if grep -qiE 'invalid api key|fix external api key|authentication_error|please run .*(login|setup-token)|oauth token.*(expired|invalid)' /tmp/claude-output.txt; then
+            gh issue create -R "$GITHUB_REPOSITORY" \
+              --title "Auto-fix blocked: Claude auth failed (proposal #$PROPOSAL_ID)" \
+              --body "The headless Claude run could not authenticate, so the auto-fix loop could not run. Regenerate the credential locally with \`claude setup-token\` and update the \`CLAUDE_CODE_OAUTH_TOKEN\` secret.
+
+          Failed verify run: $RUN_URL" || true
+            echo "::error::Claude authentication failed; see issue."
+            exit 1
+          fi
 
       - name: Commit, push, and re-run verification
         run: |
