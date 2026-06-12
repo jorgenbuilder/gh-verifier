@@ -95,6 +95,11 @@ jobs:
       # Do NOT also set ANTHROPIC_API_KEY here — the CLI prefers it if present, and
       # this repo's key is currently invalid.
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # PAT (actions:write) used ONLY to re-dispatch verify. GitHub suppresses
+      # workflow_run events for runs started with GITHUB_TOKEN, so a GITHUB_TOKEN
+      # re-dispatch would be invisible to this loop (no iterate-on-fail, no
+      # cleanup-on-green). A real-identity PAT makes the re-verify fire workflow_run.
+      AUTOFIX_DISPATCH_TOKEN: ${{ secrets.AUTOFIX_DISPATCH_TOKEN }}
     steps:
       - name: Require Claude credentials
         run: |
@@ -203,8 +208,15 @@ jobs:
           git pull --rebase origin main || true
           git push origin HEAD:main
 
+          # Re-dispatch with the PAT so the re-verify fires workflow_run and the loop
+          # can see its result (iterate-on-fail / cleanup-on-green). Fall back to
+          # GITHUB_TOKEN if no PAT is set — the re-run still happens, but as a
+          # one-shot (its result won't re-trigger this loop).
+          if [ -z "${AUTOFIX_DISPATCH_TOKEN:-}" ]; then
+            echo "::warning::AUTOFIX_DISPATCH_TOKEN not set — re-running as a one-shot; iterate/cleanup won't fire for this re-verify."
+          fi
           echo "Re-dispatching verify.yml for #$PROPOSAL_ID..."
-          gh workflow run verify.yml -f proposal_id="$PROPOSAL_ID"
+          GH_TOKEN="${AUTOFIX_DISPATCH_TOKEN:-$GH_TOKEN}" gh workflow run verify.yml -f proposal_id="$PROPOSAL_ID"
 
   alert:
     needs: triage
