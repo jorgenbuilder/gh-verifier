@@ -1,0 +1,276 @@
+name: Auto-Fix Verification Failures
+run-name: "Auto-fix: ${{ github.event.workflow_run.display_title }}"
+
+# Fires whenever a "Verify Proposal Build" run finishes. If it failed, triage the
+# failure and either (a) auto-repair the verifier and re-run, or (b) alert a human.
+on:
+  workflow_run:
+    workflows: ["Verify Proposal Build"]
+    types: [completed]
+
+permissions:
+  contents: write   # commit + push the fix to main
+  actions: write    # re-dispatch verify.yml
+  issues: write     # open alert / give-up issues
+
+# One auto-fix at a time per proposal, so re-runs don't race on main.
+concurrency:
+  group: auto-fix-${{ github.event.workflow_run.display_title }}
+  cancel-in-progress: false
+
+env:
+  # Give up and open an issue once a single proposal has this many failed verify
+  # runs in recent history. Each loop iteration adds one failure, so this also
+  # bounds the auto-commit + re-run loop.
+  MAX_ATTEMPTS: "3"
+
+jobs:
+  triage:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    outputs:
+      decision: ${{ steps.classify.outputs.decision }}      # fix | alert | giveup | none
+      proposal_id: ${{ steps.classify.outputs.proposal_id }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      DISPLAY_TITLE: ${{ github.event.workflow_run.display_title }}
+    steps:
+      - name: Classify the failure
+        id: classify
+        run: |
+          set -euo pipefail
+
+          # Proposal id from the run-name "Verify Proposal #142265".
+          PROPOSAL_ID=$(printf '%s' "$DISPLAY_TITLE" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+          if [ -z "$PROPOSAL_ID" ]; then
+            echo "Could not parse a proposal id from '$DISPLAY_TITLE'; nothing to do."
+            echo "decision=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "proposal_id=$PROPOSAL_ID" >> "$GITHUB_OUTPUT"
+
+          # Pull the failed run's log.
+          gh run view "$RUN_ID" --log > failure.log 2>/dev/null \
+            || gh run view "$RUN_ID" --log-failed > failure.log 2>/dev/null \
+            || true
+
+          # ---- THE GUARDRAIL ----
+          # compare-hash.ts prints "WASM HASH: ... FAILED" / "ARG HASH: ... FAILED"
+          # ONLY when a WASM was actually built and its hash did not match the
+          # on-chain payload. That mismatch is the tamper signal the verifier exists
+          # to produce. It must be reviewed by a human, never auto-"fixed".
+          if grep -qE 'HASH:.*FAILED' failure.log; then
+            echo "Detected a genuine hash MISMATCH -> alert only, no fix."
+            echo "decision=alert" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Otherwise it is a build / environment failure -> candidate for auto-fix.
+          # Bound the loop: count recent failed verify runs for THIS proposal.
+          ATTEMPTS=$(gh run list --workflow=verify.yml -s failure -L 50 \
+            --json displayTitle \
+            --jq "[.[] | select(.displayTitle | test(\"#${PROPOSAL_ID}([^0-9]|\$)\"))] | length")
+          echo "Recent failed verify runs for #$PROPOSAL_ID: $ATTEMPTS (max $MAX_ATTEMPTS)"
+
+          if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
+            echo "decision=giveup" >> "$GITHUB_OUTPUT"
+          else
+            echo "decision=fix" >> "$GITHUB_OUTPUT"
+          fi
+
+  fix:
+    needs: triage
+    if: needs.triage.outputs.decision == 'fix'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      PROPOSAL_ID: ${{ needs.triage.outputs.proposal_id }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: Require ANTHROPIC_API_KEY
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" \
+              --title "Auto-fix disabled: missing ANTHROPIC_API_KEY (proposal #$PROPOSAL_ID)" \
+              --body "Verify failed for #$PROPOSAL_ID and the auto-fix loop tried to run, but this repo has no \`ANTHROPIC_API_KEY\` secret. Add it under Settings → Secrets and variables → Actions to enable automatic fixes.
+
+          Failed run: $RUN_URL" || true
+            echo "::error::No ANTHROPIC_API_KEY secret; cannot run the auto-fix loop."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch failure log
+        run: |
+          gh run view "$RUN_ID" --log > failure.log 2>/dev/null \
+            || gh run view "$RUN_ID" --log-failed > failure.log 2>/dev/null \
+            || true
+          # Keep the prompt bounded; the tail holds the actual error.
+          tail -c 60000 failure.log > failure.tail.log
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Diagnose and patch
+        run: |
+          set -euo pipefail
+          PROMPT="$(sed "s/{{PROPOSAL_ID}}/$PROPOSAL_ID/g" scripts/auto-fix-prompt.md)"
+          {
+            printf '%s\n\n' "$PROMPT"
+            printf '## Failure log (tail)\n\n```\n'
+            cat failure.tail.log
+            printf '\n```\n'
+          } > /tmp/claude-prompt.txt
+
+          claude -p "$(cat /tmp/claude-prompt.txt)" \
+            --model opus \
+            --dangerously-skip-permissions \
+            > /tmp/claude-output.txt 2>&1 || true
+          echo "----- Claude output (tail) -----"
+          tail -c 4000 /tmp/claude-output.txt || true
+
+      - name: Commit, push, and re-run verification
+        run: |
+          set -euo pipefail
+          git config user.name  "gh-verifier-autofix[bot]"
+          git config user.email "gh-verifier-autofix@users.noreply.github.com"
+
+          # Drop transient artifacts the loop created.
+          rm -f failure.log failure.tail.log
+
+          git add -A
+          # FIX_NOTES.md alone is not a fix — Claude always writes it. Require a real
+          # change to a build/source file before we commit and re-run.
+          REAL_CHANGES=$(git diff --cached --name-only | grep -vx 'FIX_NOTES.md' || true)
+          if [ -z "$REAL_CHANGES" ]; then
+            echo "No code change produced; opening an issue instead of re-running."
+            NOTES=""
+            [ -f FIX_NOTES.md ] && NOTES=$(cat FIX_NOTES.md)
+            gh issue create -R "$GITHUB_REPOSITORY" \
+              --title "Auto-fix could not repair verify for proposal #$PROPOSAL_ID" \
+              --body "The verify build failed for #$PROPOSAL_ID and the auto-fix loop ran but produced no code change. Needs a human.
+
+          Failed run: $RUN_URL
+
+          ---
+          $NOTES" || true
+            exit 0
+          fi
+
+          echo "Changed files:"; echo "$REAL_CHANGES"
+          git commit -m "fix(verifier): auto-repair build failure from proposal #$PROPOSAL_ID
+
+          Generated by the auto-fix loop in response to a failed verification run.
+          Failed run: $RUN_URL
+
+          Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+
+          # Avoid clobbering a concurrent fix for another proposal.
+          git pull --rebase origin main || true
+          git push origin HEAD:main
+
+          echo "Re-dispatching verify.yml for #$PROPOSAL_ID..."
+          gh workflow run verify.yml -f proposal_id="$PROPOSAL_ID"
+
+  alert:
+    needs: triage
+    if: needs.triage.outputs.decision == 'alert' || needs.triage.outputs.decision == 'giveup'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PROPOSAL_ID: ${{ needs.triage.outputs.proposal_id }}
+      DECISION: ${{ needs.triage.outputs.decision }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Open alert issue
+        run: |
+          set -euo pipefail
+          if [ "$DECISION" = "alert" ]; then
+            TITLE="⚠️ HASH MISMATCH on proposal #$PROPOSAL_ID — manual review required"
+            BODY="The verifier built the WASM for proposal **#$PROPOSAL_ID** but the resulting hash did **not** match the on-chain payload.
+
+          This is the signal the verifier exists to produce. The auto-fix loop deliberately did **not** touch it — a mismatch must be reviewed by a human, never \"fixed\" into passing.
+
+          Failed run: $RUN_URL
+
+          Next steps: reproduce the build locally, confirm the on-chain module hash, and determine whether the proposal's stated commit actually builds to the proposed module. Do not adopt until resolved."
+          else
+            TITLE="Auto-fix gave up on proposal #$PROPOSAL_ID after $MAX_ATTEMPTS attempts"
+            BODY="The verify build for proposal **#$PROPOSAL_ID** failed and the auto-fix loop attempted repairs up to the $MAX_ATTEMPTS-attempt cap without producing a passing build. Needs a human.
+
+          Latest failed run: $RUN_URL"
+          fi
+
+          # --label may fail if the label doesn't exist; fall back to no label.
+          gh issue create -R "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY" \
+            || gh issue create -R "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+
+  cleanup:
+    # When a verify run SUCCEEDS, the proposal is resolved and green — delete its
+    # old failed/cancelled verify runs so the Actions tab and the proposal's history
+    # are clean. No-op on a first-try green (nothing stale to remove).
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DISPLAY_TITLE: ${{ github.event.workflow_run.display_title }}
+      SUCCESS_RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Delete stale failed runs for this proposal
+        run: |
+          set -euo pipefail
+
+          PROPOSAL_ID=$(printf '%s' "$DISPLAY_TITLE" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+          if [ -z "$PROPOSAL_ID" ]; then
+            echo "No proposal id in '$DISPLAY_TITLE'; nothing to clean up."
+            exit 0
+          fi
+          echo "Verification green for #$PROPOSAL_ID — removing its old failed verify runs."
+
+          # databaseIds of failed/cancelled verify runs for exactly this proposal.
+          STALE=$(gh run list --workflow=verify.yml -L 100 \
+            --json databaseId,displayTitle,conclusion \
+            --jq ".[]
+                  | select(.conclusion == \"failure\" or .conclusion == \"cancelled\")
+                  | select(.displayTitle | test(\"#${PROPOSAL_ID}([^0-9]|\$)\"))
+                  | .databaseId")
+
+          if [ -z "$STALE" ]; then
+            echo "No stale runs to delete."
+          else
+            for id in $STALE; do
+              [ "$id" = "$SUCCESS_RUN_ID" ] && continue
+              echo "Deleting run $id"
+              gh run delete "$id" || echo "  (could not delete $id; continuing)"
+            done
+          fi
+
+          # The proposal is resolved, so close the loop's own give-up / could-not-repair
+          # issues for it. Hash-MISMATCH alerts are deliberately left open for a human.
+          for num in $(gh issue list -R "$GITHUB_REPOSITORY" --state open -L 100 \
+              --json number,title \
+              --jq ".[]
+                    | select(.title | test(\"#${PROPOSAL_ID}([^0-9]|\$)\"))
+                    | select(.title | test(\"MISMATCH\") | not)
+                    | .number"); do
+            echo "Closing resolved issue #$num"
+            gh issue close "$num" -R "$GITHUB_REPOSITORY" \
+              -c "Verification is green for proposal #$PROPOSAL_ID ($RUN_URL). Closing automatically." || true
+          done
