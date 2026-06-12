@@ -83,8 +83,18 @@ fi
 if [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ] && grep -q 'bazel_dep(name = "pigz"' MODULE.bazel; then
     echo "Patching MODULE.bazel to add Wayback Machine mirror for pigz..."
 
+    # Use the exact pigz module version the repo pins, not a hardcoded one.
+    # BCR ships registry-only revisions (e.g. "2.8.bcr.1") that re-package the
+    # same upstream tarball with updated patches. Recent revisions add the
+    # `load("@rules_cc//cc:defs.bzl", "cc_binary")` statement required by
+    # Bazel 9 (which removed the native cc_binary global). Overriding with the
+    # wrong revision's patches reintroduces the bare rule and fails analysis.
+    PIGZ_VERSION=$(grep -E 'bazel_dep\(name = "pigz"' MODULE.bazel | sed -E 's/.*version = "([^"]+)".*/\1/' | head -1)
+    echo "  pigz module version: $PIGZ_VERSION"
+    PIGZ_BCR_MODULE="https://raw.githubusercontent.com/bazelbuild/bazel-central-registry/main/modules/pigz/${PIGZ_VERSION}"
+
     # Read the expected integrity from the BCR source.json
-    PIGZ_BCR_SOURCE=$(curl -fsSL "https://raw.githubusercontent.com/bazelbuild/bazel-central-registry/main/modules/pigz/2.8/source.json")
+    PIGZ_BCR_SOURCE=$(curl -fsSL "${PIGZ_BCR_MODULE}/source.json")
     PIGZ_INTEGRITY=$(echo "$PIGZ_BCR_SOURCE" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).integrity)")
     PIGZ_ORIGINAL_URL=$(echo "$PIGZ_BCR_SOURCE" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).url)")
     PIGZ_STRIP_PREFIX=$(echo "$PIGZ_BCR_SOURCE" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).strip_prefix)")
@@ -98,7 +108,7 @@ if [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ] && grep -q 'bazel_dep(n
 const src = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
 process.stdout.write(Object.keys(src.patches || {}).join(' '));
 ")
-    BCR_BASE="https://raw.githubusercontent.com/bazelbuild/bazel-central-registry/main/modules/pigz/2.8/patches"
+    BCR_BASE="${PIGZ_BCR_MODULE}/patches"
     PATCH_LABELS=""
     for patch in $PATCH_NAMES; do
         curl -fsSL "$BCR_BASE/$patch" -o "$PIGZ_PATCHES_DIR/$patch"
