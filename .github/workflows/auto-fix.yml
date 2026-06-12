@@ -19,6 +19,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Default repo for every `gh` call. The triage/cleanup jobs don't check out the
+  # repo, so without this `gh` can't infer it ("failed to determine base repo").
+  GH_REPO: ${{ github.repository }}
   # Give up and open an issue once a single proposal has this many failed verify
   # runs in recent history. Each loop iteration adds one failure, so this also
   # bounds the auto-commit + re-run loop.
