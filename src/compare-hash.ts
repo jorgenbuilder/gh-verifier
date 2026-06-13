@@ -1,4 +1,4 @@
-import { readFileSync, appendFileSync, existsSync } from 'fs';
+import { readFileSync, appendFileSync, existsSync, writeFileSync } from 'fs';
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
 
@@ -225,6 +225,29 @@ ${overallMatch ? '### ✅ All verifications passed!' : '### ❌ Verification fai
   console.log('='.repeat(60));
 
   writeGitHubSummary(summary);
+
+  // Machine-readable result for downstream consumers (independent verification audit).
+  // Uploaded as the `verification-result` artifact (see verify.yml). Carries exactly what
+  // this run computed; the auditor re-derives expected values from chain and compares.
+  const result = {
+    schemaVersion: 1,
+    proposalId: proposalData.proposalId,
+    title: proposalData.title,
+    expectedWasmHash: expectedWasmHash || null,
+    actualWasmHash: actualWasmHash || null,
+    wasmMatch,
+    hasArgVerification,
+    expectedArgHash: expectedArgHash || null,
+    actualArgHash: actualArgHash || null,
+    argMatch,
+    overallMatch,
+  };
+  try {
+    writeFileSync('verification-result.json', JSON.stringify(result, null, 2));
+    console.log('Wrote verification-result.json');
+  } catch (err) {
+    console.error('Failed to write verification-result.json:', err);
+  }
 
   // Exit with appropriate code
   if (overallMatch) {

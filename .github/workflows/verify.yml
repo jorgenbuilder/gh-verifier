@@ -83,3 +83,12 @@ jobs:
       - name: Compare hashes
         if: steps.fetch.outputs.skipped != 'true'
         run: npx tsx src/compare-hash.ts
+
+      - name: Upload verification result (machine-readable)
+        # Always attempt upload (even on a failed comparison) so the auditor can read the result.
+        if: ${{ always() && steps.fetch.outputs.skipped != 'true' && hashFiles('verification-result.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-result
+          path: verification-result.json
+          retention-days: 90
