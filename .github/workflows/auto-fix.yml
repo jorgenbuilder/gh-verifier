@@ -34,6 +34,7 @@ jobs:
     outputs:
       decision: ${{ steps.classify.outputs.decision }}      # fix | alert | giveup | none
       proposal_id: ${{ steps.classify.outputs.proposal_id }}
+      attempts: ${{ steps.classify.outputs.attempts }}
     env:
       GH_TOKEN: ${{ github.token }}
       RUN_ID: ${{ github.event.workflow_run.id }}
@@ -75,12 +76,33 @@ jobs:
             --json displayTitle \
             --jq "[.[] | select(.displayTitle | test(\"#${PROPOSAL_ID}([^0-9]|\$)\"))] | length")
           echo "Recent failed verify runs for #$PROPOSAL_ID: $ATTEMPTS (max $MAX_ATTEMPTS)"
+          echo "attempts=$ATTEMPTS" >> "$GITHUB_OUTPUT"
 
           if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
             echo "decision=giveup" >> "$GITHUB_OUTPUT"
           else
             echo "decision=fix" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Notify portal (verification state → db)
+        if: steps.classify.outputs.decision != 'none'
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          PORTAL_URL: https://proposal-reviewer-portal.vercel.app
+          PROPOSAL_ID: ${{ steps.classify.outputs.proposal_id }}
+          DECISION: ${{ steps.classify.outputs.decision }}
+          ATTEMPTS: ${{ steps.classify.outputs.attempts }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then echo "no CRON_SECRET; skipping portal notify"; exit 0; fi
+          post() { curl -fsS -X POST "$PORTAL_URL/api/verification-event" \
+            -H "Authorization: Bearer $CRON_SECRET" -H "Content-Type: application/json" -d "$1" \
+            && echo " portal notified" || echo " portal notify failed (non-fatal)"; }
+          case "$DECISION" in
+            alert)  post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"failed\",\"detail\":\"hash mismatch (not auto-fixable; manual review)\",\"runUrl\":\"$RUN_URL\"}" ;;
+            fix)    post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"healing\",\"iteration\":${ATTEMPTS:-1},\"detail\":\"build failure\",\"runUrl\":\"$RUN_URL\"}" ;;
+            giveup) post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"gave_up\",\"runUrl\":\"$RUN_URL\"}" ;;
+          esac
 
   fix:
     needs: triage

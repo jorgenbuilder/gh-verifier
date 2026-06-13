@@ -50,6 +50,18 @@ jobs:
         id: fetch
         run: npx tsx src/fetch-proposal.ts ${{ inputs.proposal_id }}
 
+      - name: Notify portal (verification started → db)
+        if: ${{ steps.fetch.outputs.skipped != 'true' }}
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          PORTAL_URL: https://proposal-reviewer-portal.vercel.app
+        run: |
+          [ -z "$CRON_SECRET" ] && { echo "no CRON_SECRET; skip"; exit 0; }
+          curl -fsS -X POST "$PORTAL_URL/api/verification-event" \
+            -H "Authorization: Bearer $CRON_SECRET" -H "Content-Type: application/json" \
+            -d "{\"proposalId\":\"${{ inputs.proposal_id }}\",\"type\":\"started\",\"runUrl\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            && echo " started notified" || echo " notify failed (non-fatal)"
+
       - name: Extract build steps via LLM
         if: steps.fetch.outputs.skipped != 'true'
         run: |
