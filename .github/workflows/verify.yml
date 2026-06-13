@@ -92,3 +92,18 @@ jobs:
           name: verification-result
           path: verification-result.json
           retention-days: 90
+
+      - name: Notify portal (verification green → event-driven review)
+        # Only on a successful (green) verification. Lets the portal post the verification
+        # note within seconds instead of waiting for its polling reconciler. Non-fatal.
+        if: ${{ success() && steps.fetch.outputs.skipped != 'true' }}
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          PORTAL_URL: https://proposal-reviewer-portal.vercel.app
+        run: |
+          if [ -z "$CRON_SECRET" ]; then echo "CRON_SECRET not set; skipping callback"; exit 0; fi
+          curl -fsS -X POST "$PORTAL_URL/api/review-verified-proposal" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "{\"proposalId\":\"${{ inputs.proposal_id }}\"}" \
+            && echo "portal notified" || echo "portal callback failed (non-fatal; reconciler will catch it)"
