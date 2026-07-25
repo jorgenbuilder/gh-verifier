@@ -76,11 +76,19 @@ interface ProposalData {
   canisterId: string | null;
 }
 
-function extractCommitHash(text: string): string | null {
-  // Look for git commit patterns (40-char hex)
-  const commitRegex = /\b([a-f0-9]{40})\b/gi;
-  const match = text.match(commitRegex);
-  return match ? match[0] : null;
+export function extractCommitHash(text: string): string | null {
+  // Prefer an explicitly-labelled commit. Newer proposal summaries reference the
+  // source as an abbreviated hash (e.g. "commit 6590c85f") rather than a full
+  // 40-char hash, and the surrounding text also contains the 64-char wasm hash
+  // and its short form (e.g. "hash d7b1cde1"). Anchoring on the "commit" keyword
+  // picks the right token and avoids matching a wasm-hash fragment. git resolves
+  // abbreviated hashes on checkout, so a 7+ char prefix is sufficient.
+  const labelled = text.match(/\bcommit[:\s]+([a-f0-9]{7,40})\b/i);
+  if (labelled) return labelled[1];
+
+  // Fall back to a standalone full-length (40-char) git commit hash.
+  const full = text.match(/\b([a-f0-9]{40})\b/i);
+  return full ? full[1] : null;
 }
 
 function bytesToHex(bytes: number[] | Uint8Array): string {

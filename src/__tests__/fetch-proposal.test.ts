@@ -1,7 +1,27 @@
 import { describe, it, expect } from 'vitest';
 import { IDL } from '@dfinity/candid';
 import { createHash } from 'crypto';
-import { legacyWasmHashFromPayload } from '../fetch-proposal.js';
+import { legacyWasmHashFromPayload, extractCommitHash } from '../fetch-proposal.js';
+
+describe('extractCommitHash', () => {
+  it('picks the labelled commit even when a wasm-hash fragment is nearby', () => {
+    // Real shape of proposal #143107's summary: an abbreviated commit alongside
+    // the short form of the 64-char wasm hash. The commit must win.
+    const summary =
+      'Reinstall the canister with the currently deployed wasm ' +
+      '(unchanged hash d7b1cde1, commit 6590c85f) to clear its heap state.';
+    expect(extractCommitHash(summary)).toBe('6590c85f');
+  });
+
+  it('still matches a standalone full 40-char commit hash', () => {
+    const text = 'Built from a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 of dfinity/ic';
+    expect(extractCommitHash(text)).toBe('a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
+  });
+
+  it('returns null when no commit is present', () => {
+    expect(extractCommitHash('No source reference here.')).toBeNull();
+  });
+});
 
 describe('legacyWasmHashFromPayload', () => {
   it('extracts and hashes wasm_module from a multi-field legacy payload', () => {
