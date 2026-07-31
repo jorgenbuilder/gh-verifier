@@ -1,33 +1,36 @@
-# Fix notes — proposal #143107 build failure
+# Fix notes — proposal #143258 build failure
 
 ## Root cause
 
-The run failed in the build/environment stage at **"Extract build steps via LLM"**
-with `No commit hash found in proposal. Cannot proceed with build.` This is a
-verifier-pipeline problem, not a bad proposal — no hash comparison was ever
-reached.
+The run failed in the build/environment stage at **"Build WASM"** with
+`fatal: couldn't find remote ref fc79106` — before any hash comparison, so this is a
+verifier-pipeline problem, not a bad proposal.
 
-The upstream proposal-summary format drifted. `src/fetch-proposal.ts`'s
-`extractCommitHash` only matched a **full 40-char** git hash
-(`/\b([a-f0-9]{40})\b/`). Proposal #143107's summary references its source as an
-**abbreviated** hash — `"...unchanged hash d7b1cde1, commit 6590c85f..."` — so the
-regex matched nothing, `commitHash` stayed `null`, and the downstream
-`extract-build-steps.ts` guard aborted the build. (In `fetch-proposal` itself the
-missing commit was only a warning; the fatal exit happened one step later.)
+Proposal #143258's summary references its source as an **abbreviated** 7-character
+commit (`Upgrade the Migration Canister to Commit fc79106`), and `extractCommitHash`
+(`src/fetch-proposal.ts`) legitimately passes that short hash through — a behavior
+deliberately introduced by the previous auto-repair (#143107), whose note reasoned
+"git resolves abbreviated hashes at checkout, so a 7+ char prefix is sufficient."
+
+That reasoning holds for `git checkout` against a populated local object database, but
+`scripts/build.sh` does `git clone --depth 1` (default branch only) followed by
+`git fetch --depth 1 origin fc79106`. `git fetch origin <sha>` cannot take a short
+hash: the smart-HTTP protocol only accepts a full 40-char SHA in a "want" line and
+treats anything shorter as a ref name — which doesn't exist — so the fetch aborts. The
+shallow clone also never pulled the object locally, so there was nothing to expand.
+Proposals that happened to quote a full 40-char hash worked; this is the first short-hash
+one to reach the fetch step.
 
 ## Fix
 
-Anchor extraction on the explicit `commit` keyword and accept an abbreviated
-(7–40 char) hash: `/\bcommit[:\s]+([a-f0-9]{7,40})\b/i`, falling back to the
-original standalone full-40-char match for older summaries. Keying on the
-`commit` label is deliberate — the same summary also contains `hash d7b1cde1` (the
-short form of the 64-char on-chain **wasm** hash), and a naive "any short hex"
-regex would have grabbed that instead. git resolves abbreviated hashes at
-checkout, so a 7+ char prefix is sufficient to build. This only broadens *which
-commit string is recognized*; it does not touch hash comparison, matching rules,
-or the on-chain-derived `expectedWasmHash`, so verification strength is unchanged.
+In `scripts/build.sh`, immediately before the fetch, if `COMMIT_HASH` is not already a
+full 40-char SHA, resolve it to the full SHA via the GitHub API for the same repo
+(`GET /repos/<owner>/<repo>/commits/<short>` → `.sha`) and fetch that. Verified live: the
+API expands `fc79106` → `fc79106bd7662b690ccfce113ce66008fb17eb0a`. The request uses
+`GITHUB_TOKEN` only if present (unauthenticated access works for the public dfinity/ic
+repo), and if resolution fails it falls back to fetching the hash as-is, preserving prior
+behavior.
 
-`extractCommitHash` is now exported and covered by three tests
-(`src/__tests__/fetch-proposal.test.ts`), including the exact wasm-hash-decoy case
-from #143107. Verified against live proposal #143107: `Source Commit: 6590c85f`.
-Full suite: 36 passing.
+This is a pure environment fix: it still fetches, builds, and hashes the exact commit the
+on-chain proposal points at. It does not touch `src/compare-hash.ts`, the matching rules,
+or the on-chain-derived expected hashes, so verification strength is unchanged.

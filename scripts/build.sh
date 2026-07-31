@@ -48,6 +48,30 @@ fi
 git clone --depth 1 "$REPO_URL" repo
 cd repo
 
+# Resolve abbreviated commit hashes to a full 40-char SHA before fetching.
+# Proposal summaries frequently reference the source as a short hash (e.g.
+# "commit fc79106"). `git checkout` can expand a short hash against a local
+# object database, but `git fetch origin <sha>` cannot: the smart-HTTP protocol
+# only accepts a full 40-char SHA in a "want" line and treats anything shorter
+# as a ref name, failing with "couldn't find remote ref". Since we shallow-clone
+# only the default branch, the object isn't present locally either, so we must
+# resolve the short hash to its full SHA (via the GitHub API for the same repo)
+# and fetch that. This builds the exact commit the proposal points at.
+if ! echo "$COMMIT_HASH" | grep -qiE '^[0-9a-f]{40}$'; then
+    echo "Resolving abbreviated commit $COMMIT_HASH to full SHA..."
+    REPO_SLUG=$(echo "$REPO_URL" | sed -E 's#^https?://github.com/##; s/\.git$//; s#/$##')
+    FULL_HASH=$(curl -fsSL ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/$REPO_SLUG/commits/$COMMIT_HASH" \
+        | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).sha || '')")
+    if echo "$FULL_HASH" | grep -qiE '^[0-9a-f]{40}$'; then
+        echo "  Resolved to $FULL_HASH"
+        COMMIT_HASH="$FULL_HASH"
+    else
+        echo "  Warning: could not resolve full SHA via GitHub API; attempting fetch as-is"
+    fi
+fi
+
 echo "Fetching commit $COMMIT_HASH..."
 git fetch --depth 1 origin "$COMMIT_HASH"
 git checkout "$COMMIT_HASH"
