@@ -104,7 +104,14 @@ fi
 # The pigz-2.8 tarball at zlib.net periodically changes contents, breaking the
 # checksum that the Bazel Central Registry expects. Add the Wayback Machine as
 # a mirror URL so Bazel can fetch the original tarball with the correct hash.
-if [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ] && grep -q 'bazel_dep(name = "pigz"' MODULE.bazel; then
+#
+# Skip this entirely if the repo already declares its own override for pigz.
+# As of ~mid-2025 the IC monorepo carries its own archive_override for pigz
+# (pointing at a distfiles.macports.org mirror), which is exactly the fix this
+# workaround provides. Injecting a second override makes Bazel abort with
+# "multiple overrides for dep pigz found", so defer to the repo's own override.
+if [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ] && grep -q 'bazel_dep(name = "pigz"' MODULE.bazel \
+    && ! grep -qE 'module_name\s*=\s*"pigz"' MODULE.bazel; then
     echo "Patching MODULE.bazel to add Wayback Machine mirror for pigz..."
 
     # Use the exact pigz module version the repo pins, not a hardcoded one.
@@ -173,6 +180,8 @@ fs.writeFileSync('MODULE.bazel', content);
     echo "bazel/pigz_patches/" >> .git/info/exclude
 
     echo "  pigz override injected successfully"
+elif [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ] && grep -qE 'module_name\s*=\s*"pigz"' MODULE.bazel; then
+    echo "Repo already declares its own pigz override; skipping mirror injection."
 fi
 
 # Per-repo BuildKit handling
