@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+# Resolve our own directory before any `cd`, so helper libs can be sourced with
+# an absolute path (the build steps below chdir into the cloned repo).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/pigz-guard.sh
+. "$SCRIPT_DIR/lib/pigz-guard.sh"
+
 echo "=== ICP Build Verifier ==="
 
 # Check for required files
@@ -110,8 +116,7 @@ fi
 # (pointing at a distfiles.macports.org mirror), which is exactly the fix this
 # workaround provides. Injecting a second override makes Bazel abort with
 # "multiple overrides for dep pigz found", so defer to the repo's own override.
-if [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ] && grep -q 'bazel_dep(name = "pigz"' MODULE.bazel \
-    && ! grep -qE 'module_name\s*=\s*"pigz"' MODULE.bazel; then
+if [ "$IS_IC_MONOREPO" = true ] && pigz_needs_injection "MODULE.bazel"; then
     echo "Patching MODULE.bazel to add Wayback Machine mirror for pigz..."
 
     # Use the exact pigz module version the repo pins, not a hardcoded one.
@@ -180,7 +185,7 @@ fs.writeFileSync('MODULE.bazel', content);
     echo "bazel/pigz_patches/" >> .git/info/exclude
 
     echo "  pigz override injected successfully"
-elif [ "$IS_IC_MONOREPO" = true ] && [ -f "MODULE.bazel" ] && grep -qE 'module_name\s*=\s*"pigz"' MODULE.bazel; then
+elif [ "$IS_IC_MONOREPO" = true ] && pigz_has_repo_override "MODULE.bazel"; then
     echo "Repo already declares its own pigz override; skipping mirror injection."
 fi
 
