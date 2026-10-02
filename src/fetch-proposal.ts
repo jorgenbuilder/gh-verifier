@@ -77,18 +77,26 @@ interface ProposalData {
 }
 
 export function extractCommitHash(text: string): string | null {
-  // Prefer an explicitly-labelled commit. Newer proposal summaries reference the
-  // source as an abbreviated hash (e.g. "commit 6590c85f") rather than a full
-  // 40-char hash, and the surrounding text also contains the 64-char wasm hash
-  // and its short form (e.g. "hash d7b1cde1"). Anchoring on the "commit" keyword
-  // picks the right token and avoids matching a wasm-hash fragment. git resolves
-  // abbreviated hashes on checkout, so a 7+ char prefix is sufficient.
-  const labelled = text.match(/\bcommit[:\s]+([a-f0-9]{7,40})\b/i);
-  if (labelled) return labelled[1];
-
-  // Fall back to a standalone full-length (40-char) git commit hash.
+  // Prefer a full 40-char SHA. The proposal *title* often abbreviates the source
+  // commit (e.g. "Upgrade the Registry Canister to Commit 98c898f"), but the
+  // summary body always spells it out in full — in the "Source code" link and
+  // the `git checkout <sha>` verification command. We must return that full SHA:
+  // the build pipeline shallow-clones and then `git fetch origin <sha>`, which
+  // the smart-HTTP protocol only accepts as a full 40-char SHA. Resolving a short
+  // prefix to its full form via the GitHub API is unreliable — dfinity/ic's
+  // public mirror returns 422 "No commit found for SHA" for some valid prefixes
+  // (observed for 98c898f, whose full SHA resolves fine), which previously killed
+  // the build. The first standalone 40-char hash in the combined text is the new
+  // source commit; the "Current git hash" appears later in the body.
   const full = text.match(/\b([a-f0-9]{40})\b/i);
-  return full ? full[1] : null;
+  if (full) return full[1];
+
+  // Fall back to an abbreviated, explicitly-labelled commit. Some older/terser
+  // summaries only reference a short hash (e.g. "commit 6590c85f") with no full
+  // SHA anywhere; anchoring on the "commit" keyword picks the right token and
+  // avoids matching a nearby wasm-hash fragment (e.g. "hash d7b1cde1").
+  const labelled = text.match(/\bcommit[:\s]+([a-f0-9]{7,40})\b/i);
+  return labelled ? labelled[1] : null;
 }
 
 function bytesToHex(bytes: number[] | Uint8Array): string {
