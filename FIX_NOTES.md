@@ -1,24 +1,20 @@
-# Fix notes: proposal #144742 verify failure
+# Fix notes — proposal #144742 build failure
 
-## Root cause
+**Root cause (environment, not proposal).** Proposal #144742 builds `dfinity/cycles-ledger`
+at commit `58f1d01` via `./scripts/docker-build`. That script runs
+`DOCKER_BUILDKIT=1 docker build ... --output "$tmp_outdir"`. The `--output` flag is a
+**BuildKit-only** feature, so the build inherently requires BuildKit and the `docker-buildx`
+plugin — which the `ic-build` container does not ship. `scripts/build.sh` classified
+cycles-ledger into its default branch, which tries to *disable* BuildKit by sed-replacing
+`export DOCKER_BUILDKIT=1`. That never matched (the script uses an inline `DOCKER_BUILDKIT=1`
+command prefix, not `export`), and even a successful patch would have failed because
+`--output` cannot run without BuildKit. The job therefore errored with
+"BuildKit is enabled but the buildx component is missing or broken."
 
-Not a build failure. Verify run 42224783263 died in step 2 ("Extract build steps via
-LLM") before anything was cloned or built: Gemini returned `402 Payment Required ...
-Your prepayment credits are depleted` (`RESOURCE_EXHAUSTED`). The auto-fix loop then
-classified it as a build failure, spent a Claude run, correctly produced no code change,
-and opened issue #7. So "auto fix failed" was really "there was no code to fix".
-
-## Fix
-
-- `src/extract-build-steps.ts` now parses the build instructions deterministically from
-  the proposal's own `Wasm Verification` code block (repo, build steps, `sha256sum`
-  output path) and its `didc encode` / `Upgrade Arguments` block (args, `-d`, `-t`).
-  This covers every standard DFINITY template (IC monorepo, cycles ledger, XRC, Bitcoin,
-  Dogecoin). No LLM is involved for those; it also removes an LLM trust assumption.
-- Only an unrecognised summary falls back to an LLM, now Claude via the existing
-  `CLAUDE_CODE_OAUTH_TOKEN` (headless `claude -p`). Gemini and `@google/genai` are gone.
-- `auto-fix.yml` triage now classifies third-party billing/auth errors (402,
-  `RESOURCE_EXHAUSTED`, low credit balance, missing token) as `infra`: it alerts a human
-  instead of running a pointless code auto-fix.
-
-Hash comparison (`compare-hash.ts`) and the on-chain expected hashes are untouched.
+**Fix.** Extended the existing per-repo BuildKit branch in `scripts/build.sh` — previously only
+`exchange-rate-canister`, which has the identical `--output` requirement — to also match
+`dfinity/cycles-ledger`, so buildx (pinned to `v0.20.1`) is installed for it instead of
+BuildKit being (ineffectively) disabled. This is the minimal, surgical change in the style of
+the surrounding code; it does not touch hash comparison or any verification logic. After the
+fix the real `docker-build` runs unmodified and the produced `cycles-ledger.wasm.gz` is hashed
+and compared against the on-chain payload as normal.

@@ -187,9 +187,11 @@ fi
 # Per-repo BuildKit handling
 # The IC build container lacks the buildx plugin, so BuildKit fails by default.
 # IC monorepo: disable BuildKit (uses Bazel, not docker build)
-# exchange-rate-canister: needs BuildKit for --output flag, so install buildx
+# exchange-rate-canister / cycles-ledger: their docker-build invokes
+#   `docker build ... --output <dir>`, which is a BuildKit-only feature, so
+#   disabling BuildKit can never work for them — install buildx instead.
 # Other repos: disable BuildKit as a safe default
-if [[ "$REPO_URL" == *"dfinity/exchange-rate-canister"* ]]; then
+if [[ "$REPO_URL" == *"dfinity/exchange-rate-canister"* ]] || [[ "$REPO_URL" == *"dfinity/cycles-ledger"* ]]; then
     echo "Installing docker buildx plugin for BuildKit support..."
     mkdir -p /usr/local/lib/docker/cli-plugins
     BUILDX_VERSION="v0.20.1"
