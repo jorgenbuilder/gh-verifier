@@ -107,11 +107,11 @@ jobs:
           post() { curl -fsS -X POST "$PORTAL_URL/api/verification-event" \
             -H "Authorization: Bearer $CRON_SECRET" -H "Content-Type: application/json" -d "$1" \
             && echo " portal notified" || echo " portal notify failed (non-fatal)"; }
+          # alert / infra / giveup are reported by the alert job as a single
+          # needs_attention event (report + urgent push + retry button), so only the
+          # self-healing transition is posted here; no duplicate pushes.
           case "$DECISION" in
-            alert)  post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"failed\",\"detail\":\"hash mismatch (not auto-fixable; manual review)\",\"runUrl\":\"$RUN_URL\"}" ;;
             fix)    post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"healing\",\"iteration\":${ATTEMPTS:-1},\"detail\":\"build failure\",\"runUrl\":\"$RUN_URL\"}" ;;
-            infra)  post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"failed\",\"detail\":\"service billing/auth failure (not a build problem; needs a human)\",\"runUrl\":\"$RUN_URL\"}" ;;
-            giveup) post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"gave_up\",\"runUrl\":\"$RUN_URL\"}" ;;
           esac
 
   fix:
@@ -132,6 +132,8 @@ jobs:
       # re-dispatch would be invisible to this loop (no iterate-on-fail, no
       # cleanup-on-green). A real-identity PAT makes the re-verify fire workflow_run.
       AUTOFIX_DISPATCH_TOKEN: ${{ secrets.AUTOFIX_DISPATCH_TOKEN }}
+      # Portal "needs you" report (push + retry button) for failures only a human can fix.
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
     steps:
       - name: Require Claude credentials
         run: |
@@ -196,6 +198,7 @@ jobs:
               --body "The headless Claude run could not authenticate, so the auto-fix loop could not run. Regenerate the credential locally with \`claude setup-token\` and update the \`CLAUDE_CODE_OAUTH_TOKEN\` secret.
 
           Failed verify run: $RUN_URL" || true
+            FAILURE_LOG=failure.tail.log node scripts/report-needs-attention.mjs billing_or_auth --no-llm || true
             echo "::error::Claude authentication failed; see issue."
             exit 1
           fi
@@ -207,7 +210,8 @@ jobs:
           git config user.email "gh-verifier-autofix@users.noreply.github.com"
 
           # Drop transient artifacts the loop created.
-          rm -f failure.log failure.tail.log
+          mv -f failure.tail.log /tmp/failure.tail.log 2>/dev/null || true
+          rm -f failure.log
 
           git add -A
           # FIX_NOTES.md alone is not a fix — Claude always writes it. Require a real
@@ -225,6 +229,7 @@ jobs:
 
           ---
           $NOTES" || true
+            FAILURE_LOG=/tmp/failure.tail.log node scripts/report-needs-attention.mjs no_fix || true
             exit 0
           fi
 
@@ -259,7 +264,33 @@ jobs:
       PROPOSAL_ID: ${{ needs.triage.outputs.proposal_id }}
       DECISION: ${{ needs.triage.outputs.decision }}
       RUN_URL: ${{ github.event.workflow_run.html_url }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Report to the portal (push + retry button)
+        # Claude writes "why it failed / what you need to do"; if Claude itself can't run
+        # (e.g. out of credits) the script falls back to a templated report, so the push
+        # always lands. Never fails the job.
+        run: |
+          gh run view "$RUN_ID" --log > failure.log 2>/dev/null \
+            || gh run view "$RUN_ID" --log-failed > failure.log 2>/dev/null || true
+          tail -c 60000 failure.log > failure.tail.log
+          case "$DECISION" in
+            alert)  CAUSE=hash_mismatch ;;
+            infra)  CAUSE=billing_or_auth ;;
+            giveup) CAUSE=gave_up ;;
+            *)      CAUSE=other ;;
+          esac
+          npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
+          node scripts/report-needs-attention.mjs "$CAUSE" || true
+
       - name: Open alert issue
         run: |
           set -euo pipefail
