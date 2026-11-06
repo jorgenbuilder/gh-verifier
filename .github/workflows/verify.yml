@@ -62,14 +62,13 @@ jobs:
             -d "{\"proposalId\":\"${{ inputs.proposal_id }}\",\"type\":\"started\",\"runUrl\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
             && echo " started notified" || echo " notify failed (non-fatal)"
 
-      - name: Extract build steps via LLM
+      - name: Extract build steps
+        # Parsed deterministically from the proposal's own "Wasm Verification"
+        # section; falls back to Claude only for an unrecognised summary format.
         if: steps.fetch.outputs.skipped != 'true'
-        run: |
-          # Extra masking for the API key
-          echo "::add-mask::$GEMINI_API_KEY"
-          npx tsx src/extract-build-steps.ts
+        run: npx tsx src/extract-build-steps.ts
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
       - name: Build WASM
         if: steps.fetch.outputs.skipped != 'true'

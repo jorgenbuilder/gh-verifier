@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { execFileSync } from 'child_process';
 import { readFileSync, writeFileSync } from 'fs';
 
 interface ProposalData {
@@ -33,6 +33,111 @@ export function detectBuildProfile(repoUrl: string): 'ic-monorepo' | 'standard' 
   return normalized === 'https://github.com/dfinity/ic' ? 'ic-monorepo' : 'standard';
 }
 
+export interface ExtractedBuild {
+  repoUrl: string;
+  steps: string[];
+  wasmOutputPath: string;
+  upgradeArgs: string | null;
+  upgradeArgsDid: string | null;
+  upgradeArgsType: string | null;
+}
+
+/** Fenced code blocks in order, with the text preceding each (to find the heading). */
+function codeBlocksAfter(summary: string, heading: RegExp): string | null {
+  const lines = summary.split('\n');
+  let seenHeading = false;
+  let inBlock = false;
+  let buf: string[] = [];
+  for (const line of lines) {
+    if (!inBlock && /^#{1,6}\s/.test(line)) {
+      seenHeading = heading.test(line);
+      continue;
+    }
+    if (/^\s*```/.test(line)) {
+      if (inBlock) {
+        if (seenHeading) return buf.join('\n');
+        inBlock = false;
+        buf = [];
+      } else {
+        inBlock = true;
+      }
+      continue;
+    }
+    if (inBlock) buf.push(line);
+  }
+  return null;
+}
+
+function extractRepoUrl(summary: string): string | null {
+  const repoLine = summary.match(/^Repository:\s*`?(https:\/\/github\.com\/[\w.-]+\/[\w.-]+?)(?:\.git)?`?\s*$/m);
+  if (repoLine) return normalizeRepoUrl(repoLine[1]);
+  const sshClone = summary.match(/git clone\s+git@github\.com:([\w.-]+\/[\w.-]+?)(?:\.git)?\s*$/m);
+  if (sshClone) return `https://github.com/${sshClone[1]}`;
+  const httpsClone = summary.match(/git clone\s+(https:\/\/github\.com\/[\w.-]+\/[\w.-]+?)(?:\.git)?\s*$/m);
+  if (httpsClone) return normalizeRepoUrl(httpsClone[1]);
+  const treeLink = summary.match(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:tree|commit)\/[0-9a-f]{7,40}/);
+  if (treeLink) return `https://github.com/${treeLink[1]}`;
+  return null;
+}
+
+/** Parse a `didc encode [-d file] [-t 'type'] '<args>'` line. */
+export function parseDidcLine(line: string): { args: string; did: string | null; type: string | null } | null {
+  const m = line.match(/didc\s+encode\s+(.*?)\s*(?:\|\s*xxd.*)?$/);
+  if (!m) return null;
+  const rest = m[1];
+  const did = rest.match(/-d\s+(\S+)/)?.[1] ?? null;
+  const type = rest.match(/-t\s+'([^']*)'/)?.[1] ?? rest.match(/-t\s+"([^"]*)"/)?.[1] ?? null;
+  // The candid value is the last single-quoted argument.
+  const quoted = [...rest.matchAll(/'([^']*)'/g)].map((q) => q[1]);
+  const args = quoted.length ? quoted[quoted.length - 1] : null;
+  if (args === null || (type !== null && quoted.length < 2)) return null;
+  return { args, did, type };
+}
+
+/**
+ * Deterministically extract build instructions from the standard DFINITY proposal
+ * templates ("Wasm Verification" / "WASM Verification" code block, "Upgrade args" /
+ * "Upgrade Arguments Verification" didc line). Returns null if the summary does not
+ * follow a recognised template, in which case the caller may fall back to the LLM.
+ */
+export function extractDeterministic(summary: string): ExtractedBuild | null {
+  const repoUrl = extractRepoUrl(summary);
+  const block = codeBlocksAfter(summary, /wasm\s+verification/i);
+  if (!repoUrl || !block) return null;
+
+  const steps: string[] = [];
+  let wasmOutputPath: string | null = null;
+  for (const raw of block.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (/^(git\s+(clone|fetch|checkout)\b|cd\s)/.test(line)) continue;
+    const sha = line.match(/^sha256sum\s+(\S+)\s*$/);
+    if (sha) {
+      wasmOutputPath = sha[1].replace(/^\.\//, '');
+      continue;
+    }
+    steps.push(line);
+  }
+  if (!wasmOutputPath || steps.length === 0) return null;
+
+  let upgradeArgs: string | null = null;
+  let upgradeArgsDid: string | null = null;
+  let upgradeArgsType: string | null = null;
+  const didcLine = summary.split('\n').find((l) => /didc\s+encode/.test(l));
+  if (didcLine) {
+    const parsed = parseDidcLine(didcLine.trim());
+    if (!parsed) return null; // a didc line we can't parse: don't guess
+    upgradeArgs = parsed.args;
+    upgradeArgsDid = parsed.did;
+    upgradeArgsType = parsed.type;
+  } else {
+    const candid = codeBlocksAfter(summary, /upgrade\s+arg/i);
+    if (candid && candid.trim()) upgradeArgs = candid.trim();
+  }
+
+  return { repoUrl, steps, wasmOutputPath, upgradeArgs, upgradeArgsDid, upgradeArgsType };
+}
+
 const EXTRACTION_PROMPT = `You are analyzing an ICP (Internet Computer Protocol) governance proposal to extract build verification instructions.
 
 The proposal describes a canister upgrade. Extract the repository URL, build commands, output path, and upgrade arguments. Return as JSON:
@@ -63,36 +168,25 @@ Common build patterns:
 Proposal text:
 `;
 
-async function callGemini(prompt: string): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
-
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY environment variable is required');
+async function callClaude(prompt: string): Promise<string> {
+  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    throw new Error('CLAUDE_CODE_OAUTH_TOKEN is required for the LLM fallback');
   }
-
-  const ai = new GoogleGenAI({ apiKey });
-
-  // Overridable so a future model deprecation is a config change, not a code
-  // change. gemini-2.0-flash was retired by Google (404 "no longer available").
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-  console.log(`Using Gemini model: ${model}`);
-
-  const response = await ai.models.generateContent({
-    model,
-    contents: prompt,
-    config: {
-      temperature: 0.1,
-      // gemini-2.5 models spend output tokens on internal "thinking" before the
-      // answer. 1024 was too tight: thinking consumed the budget and truncated
-      // the JSON mid-string. The JSON itself is tiny; give generous headroom.
-      maxOutputTokens: 8192,
-    },
-  });
-
-  return response.text || '';
+  // Overridable so a model change is config, not code.
+  const model = process.env.EXTRACT_MODEL || 'sonnet';
+  console.log(`Using Claude model: ${model}`);
+  // Headless Claude Code, authenticated with the same OAuth token the auto-fix
+  // loop uses. Do NOT pass ANTHROPIC_API_KEY: the CLI prefers it if present.
+  const env = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  return execFileSync(
+    'npx',
+    ['-y', '@anthropic-ai/claude-code', '-p', prompt, '--model', model, '--output-format', 'text'],
+    { env, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, timeout: 5 * 60 * 1000 },
+  );
 }
 
-function parseGeminiResponse(response: string): { repoUrl: string; steps: string[]; wasmOutputPath: string; upgradeArgs: string | null; upgradeArgsDid: string | null; upgradeArgsType: string | null } {
+function parseLlmResponse(response: string): { repoUrl: string; steps: string[]; wasmOutputPath: string; upgradeArgs: string | null; upgradeArgsDid: string | null; upgradeArgsType: string | null } {
   // Try to extract JSON from the response
   let jsonStr = response.trim();
 
@@ -118,7 +212,7 @@ function parseGeminiResponse(response: string): { repoUrl: string; steps: string
       upgradeArgsType: parsed.upgradeArgsType || null,
     };
   } catch (err) {
-    console.error('Failed to parse Gemini response:', response);
+    console.error('Failed to parse LLM response:', response);
     throw new Error(`Failed to parse LLM response: ${err}`);
   }
 }
@@ -140,29 +234,36 @@ async function main() {
 
   console.log('');
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('  STEP 2: EXTRACT BUILD INSTRUCTIONS VIA LLM');
+  console.log('  STEP 2: EXTRACT BUILD INSTRUCTIONS');
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('');
-  console.log('TRUST ASSUMPTION: Using Google Gemini to parse the proposal');
-  console.log('summary and extract the build commands. The LLM interprets the');
-  console.log('human-readable instructions to determine how to build the WASM.');
   console.log('');
   console.log(`Proposal: ${proposalData.title}`);
   console.log(`Commit to build: ${proposalData.commitHash}`);
 
-  const prompt = EXTRACTION_PROMPT + `
+  let extracted = extractDeterministic(proposalData.summary);
+  if (extracted) {
+    console.log('');
+    console.log('Parsed deterministically from the proposal\'s own verification');
+    console.log('section (no LLM involved).');
+  } else {
+    console.log('');
+    console.log('Summary does not match a known template; falling back to LLM.');
+    console.log('TRUST ASSUMPTION: Using Claude to parse the proposal');
+    console.log('summary and extract the build commands.');
+    const prompt = EXTRACTION_PROMPT + `
 Title: ${proposalData.title}
 Summary: ${proposalData.summary}
 URL: ${proposalData.url}
 `;
+    const response = await callClaude(prompt);
+    console.log('LLM response received');
+    extracted = parseLlmResponse(response);
+  }
 
-  const response = await callGemini(prompt);
-  console.log('Gemini response received');
-
-  const { repoUrl, steps, wasmOutputPath, upgradeArgs, upgradeArgsDid, upgradeArgsType } = parseGeminiResponse(response);
+  const { repoUrl, steps, wasmOutputPath, upgradeArgs, upgradeArgsDid, upgradeArgsType } = extracted;
 
   console.log('');
-  console.log('LLM EXTRACTED BUILD INSTRUCTIONS:');
+  console.log('EXTRACTED BUILD INSTRUCTIONS:');
   console.log('─────────────────────────────────────────────────────────────────');
   const buildProfile = detectBuildProfile(repoUrl);
 

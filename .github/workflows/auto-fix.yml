@@ -32,7 +32,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
     outputs:
-      decision: ${{ steps.classify.outputs.decision }}      # fix | alert | giveup | none
+      decision: ${{ steps.classify.outputs.decision }}      # fix | alert | infra | giveup | none
       proposal_id: ${{ steps.classify.outputs.proposal_id }}
       attempts: ${{ steps.classify.outputs.attempts }}
     env:
@@ -70,6 +70,15 @@ jobs:
             exit 0
           fi
 
+          # Third-party service billing/auth failures (e.g. an LLM provider out of
+          # credits) are not code bugs. A Claude auto-fix run cannot repair them and
+          # just burns a run, so alert a human with the cause instead.
+          if grep -qiE '402 Payment Required|RESOURCE_EXHAUSTED|prepayment credits|credit balance is too low|CLAUDE_CODE_OAUTH_TOKEN is required|authentication_error' failure.log; then
+            echo "Detected a service billing/auth failure -> alert, no code fix."
+            echo "decision=infra" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Otherwise it is a build / environment failure -> candidate for auto-fix.
           # Bound the loop: count recent failed verify runs for THIS proposal.
           ATTEMPTS=$(gh run list --workflow=verify.yml -s failure -L 50 \
@@ -101,6 +110,7 @@ jobs:
           case "$DECISION" in
             alert)  post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"failed\",\"detail\":\"hash mismatch (not auto-fixable; manual review)\",\"runUrl\":\"$RUN_URL\"}" ;;
             fix)    post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"healing\",\"iteration\":${ATTEMPTS:-1},\"detail\":\"build failure\",\"runUrl\":\"$RUN_URL\"}" ;;
+            infra)  post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"failed\",\"detail\":\"service billing/auth failure (not a build problem; needs a human)\",\"runUrl\":\"$RUN_URL\"}" ;;
             giveup) post "{\"proposalId\":\"$PROPOSAL_ID\",\"type\":\"gave_up\",\"runUrl\":\"$RUN_URL\"}" ;;
           esac
 
@@ -242,7 +252,7 @@ jobs:
 
   alert:
     needs: triage
-    if: needs.triage.outputs.decision == 'alert' || needs.triage.outputs.decision == 'giveup'
+    if: needs.triage.outputs.decision == 'alert' || needs.triage.outputs.decision == 'giveup' || needs.triage.outputs.decision == 'infra'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -262,6 +272,11 @@ jobs:
           Failed run: $RUN_URL
 
           Next steps: reproduce the build locally, confirm the on-chain module hash, and determine whether the proposal's stated commit actually builds to the proposed module. Do not adopt until resolved."
+          elif [ "$DECISION" = "infra" ]; then
+            TITLE="Verify blocked by a service billing/auth failure on proposal #$PROPOSAL_ID"
+            BODY="The verify run for proposal **#$PROPOSAL_ID** failed on a third-party credential or billing error (see the log for the exact message), not on the build. The auto-fix loop skipped it because no code change can repair it. Fix the credential or billing, then re-run verify.
+
+          Failed run: $RUN_URL"
           else
             TITLE="Auto-fix gave up on proposal #$PROPOSAL_ID after $MAX_ATTEMPTS attempts"
             BODY="The verify build for proposal **#$PROPOSAL_ID** failed and the auto-fix loop attempted repairs up to the $MAX_ATTEMPTS-attempt cap without producing a passing build. Needs a human.

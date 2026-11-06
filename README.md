@@ -32,7 +32,7 @@ This system is transparent about what it trusts:
 | **Blockchain data**    | Proposal data is fetched directly from the NNS governance canister. The Internet Computer's consensus mechanism guarantees this data is canonical. |
 | **Git commits**        | The commit hash cryptographically identifies a specific code snapshot. As long as the code can be retrieve, it's guaranteed to be correct.         |
 | **Build environment**  | Builds run in DFINITY's official `ghcr.io/dfinity/ic-build` container image, ensuring a standardized, reproducible environment.                    |
-| **Build instructions** | An LLM (Google Gemini) extracts build steps from the proposal text. This is the weakest link—ambiguous instructions could be misinterpreted.       |
+| **Build instructions** | Parsed deterministically from the proposal's own "Wasm Verification" / "Upgrade args" sections (the standard DFINITY templates). Only an unrecognised format falls back to an LLM (Claude), which is then the weakest link. |
 | **GitHub Actions**     | The execution environment is provided by GitHub. See below for discussion on this.                                                                 |
 
 ## What Makes This Good
